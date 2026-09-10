@@ -22275,7 +22275,7 @@ class App:
         ttk.Button(bb, text="Close", command=win.destroy).pack(side="right")
         ghb = ttk.Button(bb, text="GitHub", command=lambda: __import__(
             "webbrowser").open(
-            "https://github.com/NoisySnooper/SQUISHE"))
+            "https://github.com/NoisySnooper/SPARTA"))
         ghb.pack(side="right", padx=(0, PAD_X))
         Tooltip(ghb, "Open the project repository in your browser.")
         wtb = ttk.Button(bb, text="Welcome & tour\u2026",
@@ -22358,7 +22358,7 @@ class App:
         _link("https://github.com/matthewrdiamond/"
               "DAC-Absorption-Fringe-Analysis")
         txt.insert("end", "\nMIT licensed. Source, issues and releases:\n")
-        _link("https://github.com/NoisySnooper/SQUISHE")
+        _link("https://github.com/NoisySnooper/SPARTA")
         txt.insert("end", "\n"
                           "'Welcome & tour\u2026' starts the tour.\n")
         txt.configure(state="disabled")

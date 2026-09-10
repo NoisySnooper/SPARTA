@@ -30,6 +30,6 @@ The fringe-analysis core is Matthew R. Diamond's defringe_dac.py:
 https://github.com/matthewrdiamond/DAC-Absorption-Fringe-Analysis
 
 MIT licensed. Source, issues and releases:
-https://github.com/NoisySnooper/SQUISHE
+https://github.com/NoisySnooper/SPARTA
 
 'Welcome & tour...' starts the tour.

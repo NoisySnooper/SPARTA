@@ -379,7 +379,7 @@ def test_about_credits(a):
         assert "vendored under the MIT license" not in body
         assert ("https://github.com/matthewrdiamond/"
                 "DAC-Absorption-Fringe-Analysis") in body
-        assert "https://github.com/NoisySnooper/SQUISHE" in body
+        assert "https://github.com/NoisySnooper/SPARTA" in body
         assert "lnk" in txt.tag_names(), "the repo lines are not links"
     finally:
         win.destroy()
