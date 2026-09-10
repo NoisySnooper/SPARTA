@@ -10,7 +10,7 @@ spectra from diamond-anvil-cell experiments (developed for NSLS-II beamline
 ## Download (no Python needed)
 
 Most people want **SPARTA_v1.5.0_signed-runtime.zip** from the
-[Releases page](https://github.com/NoisySnooper/SQUISHE/releases/latest):
+[Releases page](https://github.com/NoisySnooper/SPARTA/releases/latest):
 unzip it anywhere and double-click `SPARTA.exe`. There is no installer, no
 administrator rights are needed, and nothing is written to the registry.
 Windows 10 / 11, 64-bit.
@@ -360,7 +360,7 @@ The source route below (`python app.py`, or `run.bat`) stays for developers.
   panel-divider drags and pane toggles are much faster (debounced
   redraws); theme switching is twice as fast.
 - **SQUISHE everywhere**: the repository is now
-  `github.com/NoisySnooper/SQUISHE` (the old URL redirects), the macOS
+  `github.com/NoisySnooper/SPARTA` (the old SQUISHE URL redirects), the macOS
   bundle builds as `SQUISHE.app`, and the Windows package launcher is
   `SQUISHE.exe`.
 
