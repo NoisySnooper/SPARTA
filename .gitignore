@@ -43,3 +43,7 @@ dist_win7/
 
 # internal test-suite policy note (kept locally, not published)
 tests/TESTING_POLICY.md
+
+# release zips kept in the tree
+!SPARTA_v1.5.0_signed-runtime.zip
+!SPARTA_v1.5.0_win7.zip
