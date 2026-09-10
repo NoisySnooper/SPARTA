@@ -1,11 +1,13 @@
-"""C/D-tagged CSV export and the auto-rescan poll (v1.4.8).
+"""The C/D name rule and the auto-rescan poll (v1.4.8, merged in R20).
 
 Two features that must not drift:
 
-* 'Save C/D-tagged CSVs' writes the SAME per-point absorbance CSVs a Run
-  writes, only with the branch letter in the name. The naming rule and the
-  byte-for-byte identity with engine's own writer are the contract, and the
-  batch sidecar is a frozen provenance schema.
+* The C/D tag row of EXPORT > DATA FILES puts the branch letter into the
+  name of the SAME per-point absorbance CSV a Run writes. The naming rule
+  and the byte-for-byte identity with engine's own writer are the contract,
+  and the export sidecar is a frozen provenance schema. Before R20 these
+  were second copies in a cd_tagged subfolder; the rule they carry is the
+  same one.
 * Auto rescan owns exactly ONE root.after timer, cancels cleanly, and its
   two controls persist in SETTINGS (workflow state, not figure state).
 
@@ -18,7 +20,8 @@ import pytest
 
 import app
 import engine
-from conftest import ROOT, gui, make_result, shared_app
+from conftest import ROOT, gui, make_result, offscreen, open_dialog, \
+    shared_app
 
 USES_APP = True
 pytestmark = gui
@@ -45,7 +48,7 @@ def _load(a, results):
     a._finish_run([dict(r) for r in results], [], "dest")
 
 
-# ------------------------------------------------ C/D-tagged CSV export ----
+# ------------------------------------------------------- the C/D name rule --
 def test_tagged_csv_naming_rule(a, tmp_path):
     """{DAC}_{sample}_{value}_{C|D}_absorbance.csv -- the branch letter goes
     exactly where Run already puts a file-name branch tag; anything not
@@ -53,60 +56,76 @@ def test_tagged_csv_naming_rule(a, tmp_path):
     said D but whose D box the user cleared); and two points that would land
     on one name keep both files."""
     res = _trio()
-    branches = {res[0]["label"]: "C", res[1]["label"]: "C",
-                res[2]["label"]: "D"}
-    written = a._write_tagged_csvs(res, branches, str(tmp_path))
-    assert [os.path.basename(p) for p in written] == [
+    _load(a, res)
+    for r in a.results:
+        a.dvars[r["label"]].set(r["pressure_str"] == "9p0")
+    written = a._write_final_csvs(a.results, str(tmp_path), columns=[],
+                                  cd_names=True)["paths"]
+    assert sorted(os.path.basename(p) for p in written) == [
         "Y04_Arch29_12p5_C_absorbance.csv",
         "Y04_Arch29_18p0_C_absorbance.csv",
         "Y04_Arch29_9p0_D_absorbance.csv"]
     assert all(os.path.isfile(p) for p in written)
 
+    # the D box cleared on a point whose raw name said D: compression
     plain = tmp_path / "plain"
-    plain.mkdir()
-    written = a._write_tagged_csvs(res, {}, str(plain))
-    assert [os.path.basename(p) for p in written] == [
+    for r in a.results:
+        a.dvars[r["label"]].set(False)
+    written = a._write_final_csvs(a.results, str(plain), columns=[],
+                                  cd_names=True)["paths"]
+    assert sorted(os.path.basename(p) for p in written) == [
         "Y04_Arch29_12p5_C_absorbance.csv",
         "Y04_Arch29_18p0_C_absorbance.csv",
         "Y04_Arch29_9p0_C_absorbance.csv"]
 
     coll = tmp_path / "collide"
-    coll.mkdir()
     x = _res("Y04", "Arch29", "12p5", 12.5)
     y = _res("Y04", "Arch29", "12p5", 12.5, "D")
     y["label"] = x["label"] + " [D]"          # distinct identity, same stem
-    written = a._write_tagged_csvs([x, y], {}, str(coll))
+    written = a._write_final_csvs([x, y], str(coll), columns=[],
+                                  cd_names=True)["paths"]
     assert [os.path.basename(p) for p in written] == [
         "Y04_Arch29_12p5_C_absorbance.csv",
         "Y04_Arch29_12p5-2_C_absorbance.csv"]
-    assert len([f for f in os.listdir(str(coll)) if f.endswith(".csv")]) == 2
+    assert len([f for f in os.listdir(str(coll))
+                if f.endswith(".csv")]) == 2
 
 
 def test_tagged_csv_content_matches_untagged_writer(a, tmp_path):
-    """Only the name changes: the bytes are the normal writer's."""
+    """Only the name changes: with no columns ticked the bytes are the ones
+    engine's own writer produces."""
     res = _trio()
+    _load(a, res)
+    for r in a.results:
+        a.dvars[r["label"]].set(r["pressure_str"] == "9p0")
     tagged = tmp_path / "tagged"
     plain = tmp_path / "plain"
-    tagged.mkdir()
     plain.mkdir()
-    written = a._write_tagged_csvs(res, {res[2]["label"]: "D"}, str(tagged))
-    for r, p in zip(res, written):
-        ref = engine.write_absorbance_csv(dict(r, branch_tag=None), str(plain))
+    written = a._write_final_csvs(a.results, str(tagged), columns=[],
+                                  cd_names=True)["paths"]
+    for r, p in zip(a.results, written):
+        ref = engine.write_absorbance_csv(dict(r, branch_tag=None),
+                                          str(plain))
         assert open(ref, "rb").read() == open(p, "rb").read()
 
 
-def test_tagged_csv_export_follows_the_d_toggles_and_writes_one_sidecar(
-        a, tmp_path, monkeypatch):
-    """End to end through the button handler: branch = what the plot uses
-    (auto-detected D plus the manual toggles), plus one batch sidecar whose
-    schema is frozen."""
+def test_the_export_dialog_writes_one_folder_and_one_sidecar(a, tmp_path):
+    """End to end through EXPORT > DATA FILES: the branch is what the plot
+    uses (auto-detected D plus the manual toggles), every point has exactly
+    ONE file, and ONE sidecar covers the whole write."""
     _load(a, _trio())
     for r in a.results:                       # deterministic branch state
         a.dvars[r["label"]].set(r["pressure_str"] == "18p0")
-    monkeypatch.setattr(app.filedialog, "askdirectory",
-                        lambda **kw: str(tmp_path))
-    monkeypatch.setattr(app.messagebox, "showinfo", lambda *x, **kw: None)
-    a._export_branch_csvs()
+    a.export_products["defringed"].set(False)
+    a.export_products["cd_tagged"].set(True)
+    with offscreen(a):
+        win = open_dialog(a._open_export_dialog)
+        try:
+            a._export_dest.set(str(tmp_path))
+            a._export_dialog_write()
+        finally:
+            win.grab_release()
+            win.destroy()
     assert sorted(os.listdir(str(tmp_path))) == [
         "Y04_Arch29_12p5_C_absorbance.csv",
         "Y04_Arch29_18p0_D_absorbance.csv",
@@ -114,25 +133,28 @@ def test_tagged_csv_export_follows_the_d_toggles_and_writes_one_sidecar(
         "_export.provenance.json"]
     with open(os.path.join(str(tmp_path), "_export.provenance.json")) as f:
         prov = json.load(f)
-    assert prov["kind"] == "branch_tagged_csv"
+    assert prov["kind"] == "data_files"
     assert prov["variable_name"] == "Pressure"
     assert prov["variable_unit"] == "GPa"
-    assert prov["params"]["n_csv"] == 3
-    assert prov["params"]["n_decompression"] == 1
+    assert prov["params"]["n"] == 3
+    assert prov["params"]["columns"] == []
+    assert prov["params"]["cd_names"] is True
     assert len(prov["files"]) == 3
 
 
-def test_tagged_csv_no_data_opens_no_dialog(a, monkeypatch):
-    """Matches the other data-dependent exports: a note, not a dialog."""
-    opened, told = [], []
-    monkeypatch.setattr(app.filedialog, "askdirectory",
-                        lambda **kw: opened.append(kw) or "")
-    monkeypatch.setattr(app.messagebox, "showinfo",
-                        lambda *x, **kw: told.append(x))
+def test_no_data_opens_the_dialog_but_writes_nothing(a):
+    """Matches the other data-dependent exports: a note, not a dialog. The
+    window still opens so it can say why it will not write."""
     a.results = []
-    a._export_branch_csvs()
-    assert opened == []
-    assert told and "Run a folder to load data" in told[0][1]
+    with offscreen(a):
+        win = open_dialog(a._open_export_dialog)
+        try:
+            assert str(a._export_go_btn.cget("state")) == "disabled"
+            assert a._export_note.cget("text") == app.EXPORT_NO_DATA_NOTE
+            assert a._export_dialog_write() is None
+        finally:
+            win.grab_release()
+            win.destroy()
 
 
 # ------------------------------------------------------- auto rescan -------

@@ -179,11 +179,17 @@ def test_guide_md_kept_the_how_to_text():
     body = open(os.path.join(GUIDE, "20_plot_tab.md"), encoding="utf-8").read()
     # R9b dropped 'the math' from every [?] title and R12 re-toned the
     # sentence; the pointer to the box is what must survive.
-    assert "The [?]\n      beside it opens the formulas." in body
+    # R19 re-wrapped the paragraph, so the sentence is matched over
+    # collapsed whitespace: the pointer is the fact, the line break is not.
+    assert "The [?] beside it opens the formulas." in " ".join(body.split())
     body = open(os.path.join(GUIDE, "23_data_tab_formulas.md"),
                 encoding="utf-8").read()
-    assert "Steps 1, 2, 3 and 5 are the Igor values verbatim." in body
-    assert "Steps 1, 2, 3 and 5 have Enable boxes." in body
+    # R20 re-wrapped the smoothing steps, so both sentences now span a
+    # line break.  They are matched over collapsed whitespace: the words
+    # and their order are the fact, the line break is not.
+    _flat = " ".join(body.split())
+    assert "Steps 1, 2, 3 and 5 are the Igor values verbatim." in _flat
+    assert "Steps 1, 2, 3 and 5 have Enable boxes." in _flat
 
 
 # ---------------------------------------------------------------------------

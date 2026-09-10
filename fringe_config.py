@@ -6,6 +6,13 @@ Vendored from `defringe_dac.py` (DAC Absorption Fringe Analysis).
     Author        : Matthew R. Diamond
     Repository    : github.com/matthewrdiamond/DAC-Absorption-Fringe-Analysis
     License       : vendored under MIT by permission of the author.
+    Upstream snapshot: commit 7988300 (2026-08-03)
+
+Deliberate deviations from that snapshot, kept on purpose (hardening; every
+other difference is a bug): drift #4 per-window rejection instead of hot-path
+asserts, #8 point-count / finiteness gate on detection, #9 Fisher p-value
+overflow guard, #10 the 20-point floor extended to the full and wide tiers,
+#13 ValueError on a zero or negative notch half-width.
 
 This module has no counterpart in the source: it replaces the source module's
 mutable globals (DIAMOND_MODEL, FIT_PHI0, FINE_WN_LO/HI, BAND_RES_FLOOR,
@@ -28,6 +35,7 @@ wn[1/nm] or divides wl[nm] is in nm; anything stored, exported or shown to a
 human is in um).  Config fields carry their unit in the field name.
 """
 
+import re
 from dataclasses import dataclass, replace
 
 try:                                    # typing-only; keeps py3.8 happy
@@ -54,9 +62,21 @@ LAMP_REGIMES = {
 }
 DEFAULT_LAMP_REGIME = 'pre_nov2025'
 
+#: The lamp changeover the source tests against (source FINE_CUTOVER_YEAR_MONTH,
+#: :961).  Acquisitions from this (year, month) on use the 11200 cm^-1 band.
+FINE_CUTOVER_YEAR_MONTH = (2025, 11)
+
 DIAMOND_MODELS = ('constant', 'cauchy', 'oscillator', 'eremets')
 DISPERSION_MODELS = ('constant_n', 'cauchy', 'linear_n', 'sellmeier',
                      'band_integral')
+
+#: Shape of the low-pass edge in the notch mask (see fringe_notch.lowpass_keep).
+#: The source module hard-codes the tanh form at two places (:6547 and its GUI
+#: preview :13591) and exposes no selector; 'tanh' is therefore the default and
+#: reproduces the source bit for bit.  'erf' is the Gaussian-integral edge of
+#: the same width, 'hard' a plain step at the cutoff.
+LP_EDGE_SHAPES = ('tanh', 'erf', 'hard')
+DEFAULT_LP_EDGE_SHAPE = 'tanh'
 
 
 @dataclass(frozen=True)
@@ -105,7 +125,9 @@ class FringeConfig:
     notch_halfwidth_um: float = 3.0          # HALF-width (+-reach) in n*t um, ABSOLUTE:
                                              # sigma_f = 2000*halfwidth_um at every centre
     lp_cutoff_um: float = 15.0               # default low-pass cutoff in n*t um
-    lp_rolloff_um: float = 2.0               # low-pass tanh roll-off width in n*t um
+    lp_rolloff_um: float = 2.0               # low-pass roll-off width in n*t um
+    lp_edge_shape: str = DEFAULT_LP_EDGE_SHAPE   # 'tanh'|'erf'|'hard'; the
+                                             # source has only the tanh form
 
     # -- Band-integrated amplitude (source: BAND_RES_FLOOR)
     band_res_floor: bool = True              # floor the band half-width at the Hann
@@ -147,6 +169,10 @@ class FringeConfig:
         if self.notch_halfwidth_um <= 0:
             raise ValueError("FringeConfig.notch_halfwidth_um must be > 0 (got %r)"
                              % (self.notch_halfwidth_um,))
+        if self.lp_edge_shape not in LP_EDGE_SHAPES:
+            raise ValueError(
+                "FringeConfig.lp_edge_shape must be one of %s (got %r)"
+                % (', '.join(LP_EDGE_SHAPES), self.lp_edge_shape))
         if not (0 < self.t_min_nm < self.t_max_nm):
             raise ValueError("FringeConfig: need 0 < t_min_nm < t_max_nm "
                              "(got %r, %r)" % (self.t_min_nm, self.t_max_nm))
@@ -235,6 +261,134 @@ class FringeConfig:
 #: Module-level convenience instance.  Frozen, so sharing it is safe; use
 #: ``DEFAULT_CONFIG.evolve(...)`` rather than mutating anything.
 DEFAULT_CONFIG = FringeConfig()
+
+
+# ---------------------------------------------------------------------------
+# Acquisition date -> lamp regime -> fine window
+# ---------------------------------------------------------------------------
+#
+# The source picks the fine window from a parsed acquisition date in its BATCH
+# pipeline (`_fine_window_for_date` :3905-3913, fed by `_parse_folder_date`
+# :3805 and the xlsx sidecar `_load_folder_date` :3814).  Its own GUI passes
+# year_month=None (:13611, :13665), so the choice never reaches the interactive
+# path upstream.  Everything below is pure: dates in, regime/config out, no
+# filesystem access and no module state.
+
+_MONTH_TOKENS = (
+    ('january', 1), ('jan', 1), ('february', 2), ('feb', 2),
+    ('march', 3), ('mar', 3), ('april', 4), ('apr', 4), ('may', 5),
+    ('june', 6), ('jun', 6), ('july', 7), ('jul', 7),
+    ('august', 8), ('aug', 8), ('september', 9), ('sept', 9), ('sep', 9),
+    ('october', 10), ('oct', 10), ('november', 11), ('nov', 11),
+    ('december', 12), ('dec', 12),
+)
+_MONTH_TOKEN_TO_INT = dict(_MONTH_TOKENS)
+
+#: "Nov2025", "_Nov_2025_", "November 2025".  The token list is closed, so
+#: words that merely start with a month abbreviation ("Decade") do not match.
+_MON_YYYY_RE = re.compile(
+    r'(?<![A-Za-z])(%s)(?![A-Za-z])[ _\-]*((?:19|20)\d{2})(?!\d)'
+    % '|'.join(tok for tok, _ in _MONTH_TOKENS), re.IGNORECASE)
+
+#: "2025-11", "2025_11", "2025.11".
+_YYYY_MM_RE = re.compile(r'(?<!\d)((?:19|20)\d{2})[-_.](0[1-9]|1[0-2])(?!\d)')
+
+
+def parse_folder_date(name):
+    """(year, month) read out of a dataset folder or file name, or None.
+
+    Covers the source's own convention and the spellings SPARTA's datasets
+    carry::
+
+        Y03_ch29_Nov2025_ProcessedCSV   -> (2025, 11)
+        Chewy_ch29_Jun2025              -> (2025, 6)
+        Y04_Arch29_2025-11_absorbance   -> (2025, 11)
+        Boba_Alm100_November 2025_CSV   -> (2025, 11)
+
+    A month token wins over an ISO token, because the month token is the
+    convention the acquisition folders actually use.  None means "no date in
+    the name"; the caller then keeps the legacy (pre-Nov-2025) window.
+    """
+    if not name:
+        return None
+    text = str(name)
+    m = _MON_YYYY_RE.search(text)
+    if m:
+        return int(m.group(2)), _MONTH_TOKEN_TO_INT[m.group(1).lower()]
+    m = _YYYY_MM_RE.search(text)
+    if m:
+        return int(m.group(1)), int(m.group(2))
+    return None
+
+
+def normalise_year_month(year_month):
+    """A plain (year, month) tuple from a 2- or 3-element date, or None.
+
+    Tolerates the (year, month, day) triple the source's xlsx sidecar returns
+    (:3895-3897).  A month outside 1-12 raises rather than silently selecting a
+    window.
+    """
+    if year_month is None:
+        return None
+    try:
+        parts = list(year_month)
+    except TypeError:
+        raise ValueError("year_month must be a (year, month) pair or None "
+                         "(got %r)" % (year_month,))
+    if len(parts) < 2:
+        raise ValueError("year_month needs a year and a month (got %r)"
+                         % (year_month,))
+    year, month = int(parts[0]), int(parts[1])
+    if not 1 <= month <= 12:
+        raise ValueError("year_month month must be 1-12 (got %r)" % (month,))
+    return (year, month)
+
+
+def lamp_regime_for_date(year_month):
+    """LAMP_REGIMES key for an acquisition date (source :3907-3910).
+
+    An unknown date (None) keeps the pre-Nov-2025 window, exactly as the source
+    does when its folder-date lookup fails (:3901-3902).
+    """
+    ym = normalise_year_month(year_month)
+    if ym is None or ym < FINE_CUTOVER_YEAR_MONTH:
+        return DEFAULT_LAMP_REGIME
+    return 'nov2025_plus'
+
+
+def fine_center_for_date(year_month):
+    """Fine-window centre in cm^-1 for an acquisition date."""
+    return LAMP_REGIMES[lamp_regime_for_date(year_month)]
+
+
+def config_for_date(year_month, cfg=None):
+    """`cfg` with its fine window centred for the acquisition date.
+
+    The D2 entry point: hand it the year-month and it returns the config the
+    fits should run under.  Same as
+    ``cfg.for_lamp_regime(lamp_regime_for_date(year_month))``.
+    """
+    base = DEFAULT_CONFIG if cfg is None else cfg
+    return base.for_lamp_regime(lamp_regime_for_date(year_month))
+
+
+def config_for_folder(name, cfg=None):
+    """`cfg` with its fine window centred for the date in a folder name.
+
+    A name with no parsable date leaves the config's fine window alone.
+    """
+    ym = parse_folder_date(name)
+    return (DEFAULT_CONFIG if cfg is None else cfg) if ym is None \
+        else config_for_date(ym, cfg=cfg)
+
+
+def fine_window_for_date(year_month, cfg=None):
+    """(lo, hi) of the fine window in nm^-1 -- the source's `_fine_window_for_date`.
+
+    Width comes from `cfg.fine_width_cm` (source FINE_WIDTH_CM).
+    """
+    c = config_for_date(year_month, cfg=cfg)
+    return c.fine_wn_lo, c.fine_wn_hi
 
 
 def make_logger(log):

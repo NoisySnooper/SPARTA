@@ -6,6 +6,13 @@ Vendored from `defringe_dac.py` (DAC Absorption Fringe Analysis).
     Author        : Matthew R. Diamond
     Repository    : github.com/matthewrdiamond/DAC-Absorption-Fringe-Analysis
     License       : vendored under MIT by permission of the author.
+    Upstream snapshot: commit 7988300 (2026-08-03)
+
+Deliberate deviations from that snapshot, kept on purpose (hardening; every
+other difference is a bug): drift #4 per-window rejection instead of hot-path
+asserts, #8 point-count / finiteness gate on detection, #9 Fisher p-value
+overflow guard, #10 the 20-point floor extended to the full and wide tiers,
+#13 ValueError on a zero or negative notch half-width.
 
 Contents (source line refs are into defringe_dac.py):
     dispersion_n            (:1297)  params -> n(lam), t, phi0 for the 4 models
@@ -33,6 +40,16 @@ SPARTA divergences from the source (each deliberate):
   4. `run_window_fits` gates the narrow-window fits on whether the fine window's
      centre falls inside the narrow band (i.e. the two are redundant) instead of
      the source's parsed-folder-date lamp-era test.
+  5. `run_window_fits` applies the source's 20-point window floor to the full and
+     wide tiers as well, where the source gates only narrow and fine.  A tier too
+     short to fit is dropped instead of aborting the channel.
+
+Grid zones inside `run_window_fits` (source `_run_all_fitters`, verbatim):
+  * the FIT runs on the window slice of the uniform wavenumber grid;
+  * the REPORTED n_mean / nt_um average n(lam) over `wl_full`, the full original
+    detector wavelength grid, in every tier (source :16097-16098, :16654-16694);
+  * the constant_n Fresnel inversion uses one wl_ref = mean(1/wn_u_full) for the
+    full/wide/narrow tiers, and the fine tier's own mean (source :16245-16262).
 
 Unit zones (source convention): the fit math runs in nm; t/nt cross to um once,
 at `dispersion_result_dict` / the `*_err` helpers, via NM_TO_UM.
@@ -40,8 +57,9 @@ Python 3.8 compatible; numpy + scipy + stdlib only.
 """
 
 import numpy as np
-from scipy.optimize import minimize, minimize_scalar
 
+# scipy.optimize is imported inside the fitters, not here: importing this module
+# must stay cheap for callers that only want the dispersion helpers.
 from fringe_config import DEFAULT_CONFIG, NM_TO_UM, make_logger
 from fringe_notch import band_integrated_amplitude
 from fringe_optics import cauchy_n_diamond, fresnel_V, fresnel_n_from_V
@@ -241,6 +259,8 @@ def fit_signal_constant_n(fft_info, label="", cfg=None, log=None):
     source asserts here; SPARTA reports through `log` and returns None so the
     caller can drop this window instead of losing the channel.
     """
+    from scipy.optimize import minimize_scalar
+
     cfg = DEFAULT_CONFIG if cfg is None else cfg
     emit = make_logger(log)
     wn_u = fft_info['wn_u']
@@ -350,6 +370,8 @@ def fit_signal_cauchy(fft_info, label="", cfg=None, log=None):
     Returns (A, B, t_nm, phi0, fringe_win, wn_u, None, None) -- the source's tuple
     shape -- or None when the FFT seed or the final amplitude is degenerate.
     """
+    from scipy.optimize import minimize
+
     cfg = DEFAULT_CONFIG if cfg is None else cfg
     emit = make_logger(log)
     wn_u = fft_info['wn_u']
@@ -405,6 +427,8 @@ def fit_signal_linear_n(fft_info, label="", cfg=None, log=None):
 
     Returns (t_nm, phi0, n0, n1, fringe_win, wn_u, None, None) or None.
     """
+    from scipy.optimize import minimize
+
     cfg = DEFAULT_CONFIG if cfg is None else cfg
     emit = make_logger(log)
     wn_u = fft_info['wn_u']
@@ -460,6 +484,8 @@ def fit_signal_sellmeier(fft_info, label="", cfg=None, log=None):
 
     Returns (B1, C1, B2, C2, t_nm, phi0, fringe_win, wn_u, None, None) or None.
     """
+    from scipy.optimize import minimize
+
     cfg = DEFAULT_CONFIG if cfg is None else cfg
     emit = make_logger(log)
     wn_u = fft_info['wn_u']
@@ -695,12 +721,26 @@ _LSQ_FITTERS = {
 }
 
 
-def _params_from_fit(model, fit_result, wl_u, cfg):
-    """Normalise a fitter's tuple into the `dispersion_n` parameter order."""
+def _params_from_fit(model, fit_result, wl_ref, cfg):
+    """Normalise a fitter's tuple into the `dispersion_n` parameter order.
+
+    `wl_ref` is the reference wavelength (nm) for the constant_n family's
+    Fresnel inversion; the dispersive models carry their own n(lam) and ignore
+    it.  The source computes it ONCE per channel (mean of 1/wn_u_full) and
+    shares it across the full/wide/narrow tiers -- see `run_window_fits`.
+
+    constant_n:  V is passed to the Fresnel inversion RAW.  The source clamps V
+    only inside `band_integrated_amplitude`; the inversion has its own internal
+    clip on R = V/2 (source :16250-16262 vs :2311).  band_integral keeps the
+    min(V, 0.9999) of the source's own band-integral extract (:2311, :2311 ->
+    _msv_extract_band_integral :2311/:2307).
+    """
     if model in ('constant_n', 'band_integral'):
         nt_fit, V_fit, phi0, _fw = fit_result
-        wl_ref = float(np.mean(wl_u))
-        n_fit = float(fresnel_n_from_V(min(float(V_fit), 0.9999), wl_ref, cfg=cfg))
+        V_for_n = min(float(V_fit), 0.9999) if model == 'band_integral' else float(V_fit)
+        n_fit = float(fresnel_n_from_V(V_for_n, wl_ref, cfg=cfg))
+        # Source :16291-16311: t_cnt = nt / max(n, 1e-6), UNCLAMPED -- it is not
+        # routed through dispersion_n's T_BOUNDS clip.
         t_nm = nt_fit / max(n_fit, 1e-6)
         return [n_fit, t_nm, phi0], 'constant_n', dict(V=float(V_fit), nt_nm=float(nt_fit))
     if model == 'cauchy':
@@ -715,8 +755,43 @@ def _params_from_fit(model, fit_result, wl_u, cfg):
     raise ValueError("unknown model %r" % (model,))
 
 
+def _constant_n_result_dict(params, extra):
+    """The source's constant_n result values (:16291-16311), not routed through
+    `dispersion_result_dict`.
+
+    n is the Fresnel-inverted constant, t is nt/n straight from the fit and
+    nt_um is the FITTED n*t -- none of the three passes the T_BOUNDS clip that
+    `dispersion_n` applies (the source clips t only inside the optimisers).
+    """
+    n_val, t_nm, phi0 = params
+    return dict(t_um=float(t_nm) * NM_TO_UM,
+                phi0=phi0,
+                n_mean=float(n_val),
+                nt_um=float(extra['nt_nm']) * NM_TO_UM,
+                n_const=n_val)
+
+
+def _averaging_wl_grid(wl_full, wn_u_full, emit, label):
+    """The wavelength grid n_mean is averaged over: the source's `wl`.
+
+    `wl_full` is the FULL original detector wavelength grid (nm) handed to
+    `_run_all_fitters`; every tier's n_mean/nt_um is averaged over it, not over
+    the window slice of the uniform wavenumber resample (source :16097-16098,
+    :16654-16694).  Callers that have no original grid (a caller working purely
+    in wavenumber space) fall back to 1/wn_u_full, the closest full-span stand-in.
+    """
+    if wl_full is None:
+        return 1.0 / wn_u_full
+    wl = np.asarray(wl_full, float).ravel()
+    if wl.size and np.all(np.isfinite(wl)) and np.all(wl > 0):
+        return wl
+    emit("%s averaging grid unusable (%d points); using 1/wn_u_full"
+         % (label, wl.size))
+    return 1.0 / wn_u_full
+
+
 def run_window_fits(fft_info, norm_u_full, wn_u_full, cfg=None, label='',
-                    log=None, method='lsq', models=None):
+                    log=None, method='lsq', models=None, wl_full=None):
     """Run the configured dispersion models over the standard window tiers.
 
     Window tiers (source `_run_all_fitters`):
@@ -724,6 +799,10 @@ def run_window_fits(fft_info, norm_u_full, wn_u_full, cfg=None, label='',
       wide   - cfg.wide_lo_cm .. cfg.wide_hi_cm
       narrow - cfg.fit_wl_min_nm .. cfg.fit_wl_max_nm
       fine   - cfg.fine_width_cm centred on cfg.fine_center_cm
+
+    `wl_full` is the full original detector wavelength grid in nm (the source's
+    `wl`).  Every tier's reported n_mean / nt_um is the average of n(lam) over
+    THAT grid, not over the tier's slice of the uniform wavenumber resample.
 
     Returns {model: {window: result_dict}}.  Each result_dict is
     `dispersion_result_dict` plus 'sigma' (from `fine_fit_sigma`) and, for the
@@ -746,6 +825,7 @@ def run_window_fits(fft_info, norm_u_full, wn_u_full, cfg=None, label='',
 
     wn_u_full = np.asarray(wn_u_full, float)
     norm_u_full = np.asarray(norm_u_full, float)
+    wl_avg = _averaging_wl_grid(wl_full, wn_u_full, emit, label)
 
     wide_mask = (wn_u_full >= cfg.wide_lo) & (wn_u_full <= cfg.wide_hi)
     wn_lo_narrow = 1.0 / cfg.fit_wl_max_nm
@@ -769,6 +849,14 @@ def run_window_fits(fft_info, norm_u_full, wn_u_full, cfg=None, label='',
             '' if narrow_ok else ' [skipped]', int(fine_mask.sum()),
             '' if fine_ok else ' [skipped]'))
 
+    # constant_n Fresnel reference wavelength (source :16245, :16260): ONE value
+    # for full/wide/narrow, taken over the whole uniform grid; the fine tier gets
+    # its own.  A per-window wl_ref would move n for every dispersive diamond
+    # model (cauchy / oscillator / eremets).
+    wl_ref_shared = float(np.mean(1.0 / wn_u_full)) if wn_u_full.size else 0.0
+    wl_ref_fine = (float(np.mean(1.0 / wn_u_full[fine_mask]))
+                   if fine_ok else wl_ref_shared)
+
     out = {}
     for model in models:
         fitter = _LSQ_FITTERS.get(model)
@@ -786,9 +874,13 @@ def run_window_fits(fft_info, norm_u_full, wn_u_full, cfg=None, label='',
             fit_result = fitter(sub, label="%s %s" % (label, wname), cfg=cfg, log=log)
             if fit_result is None:
                 continue
-            wl_u = 1.0 / sub['wn_u']
-            params, disp_model, extra = _params_from_fit(model, fit_result, wl_u, cfg)
-            rd = dispersion_result_dict(params, wl_u, disp_model, cfg=cfg)
+            wl_ref = wl_ref_fine if wname == 'fine' else wl_ref_shared
+            params, disp_model, extra = _params_from_fit(model, fit_result,
+                                                         wl_ref, cfg)
+            if disp_model == 'constant_n':
+                rd = _constant_n_result_dict(params, extra)
+            else:
+                rd = dispersion_result_dict(params, wl_avg, disp_model, cfg=cfg)
             rd.update(extra)
             rd['model'] = model
             rd['window'] = wname

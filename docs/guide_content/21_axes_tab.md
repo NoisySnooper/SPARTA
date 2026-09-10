@@ -1,42 +1,36 @@
 AXES TAB
 
-This tab sets the coordinate system. It picks the unit on each axis,
-the range, the ticks, and the box around the plot. The controls here
-leave your data as it is.
+This tab sets the coordinate system: the unit on each axis, the
+range, the ticks, and the box around the plot. The data itself is
+unchanged.
 
 
 AXES > AXIS
 
-  Four dropdowns, one per axis, and the two flips.
-
-  X axis: the spectral unit of the bottom axis. The tool converts
-    the same data on the fly, at every redraw.
+  X axis: the spectral unit of the bottom axis. SPARTA converts the
+    same data at every redraw.
 
       wavenumber [cm-1] = 1e7 / wavelength [nm]
       photon energy [eV] = 1239.84 / wavelength [nm]
 
   Y axis: what overlay mode plots on the left axis. Pick absorbance,
     one of the raw counts channels (sample / background / dark), or
-    'formula: <name>'. The formula entry appears once you pick a
-    formula in DATA > FORMULAS. Pick 'absorbance' to go back.
-    Absorbance is the default.
-    The Quick Access strip can carry a second copy of this control.
-    Both copies drive the same variable. The strip's gear picks which
-    controls the strip carries.
+    'formula: <name>', which appears once a formula is picked in
+    DATA > FORMULAS. Absorbance is the default. The Quick Access
+    strip can carry a second copy of this control, on the same
+    variable, and the strip's gear picks what it carries.
 
-  Top axis: mirror a second unit across the top of the plot.
-    Wavenumber and energy are reciprocal in wavelength. Keep X min
-    above 0 when you use them.
+  Top axis: mirrors a second unit across the top of the plot.
+    Wavenumber and energy are reciprocal in wavelength, so keep X
+    min above 0.
 
   Right axis: none, mirror the left Y, or % transmittance
     (T = 100 x 10^-A, absorbance mode only). 2D plots.
 
-  Flip X / Flip Y: reverse either axis. Flip X is the usual move when
-    you plot against wavenumber and think in wavelength.
+  Flip X / Flip Y: reverse either axis.
 
   Label gap: distance in points from the X and Y axes to their
-    labels. The 3D label gaps are separate, in PLOT > 3D PLOT
-    OPTIONS.
+    labels. The 3D label gaps are in PLOT > 3D PLOT OPTIONS.
 
 
 AXES > LIMITS & SCALE
@@ -44,17 +38,16 @@ AXES > LIMITS & SCALE
   X / Y / Z min and max. Leave a pair blank to fit the data. The Z
     row applies to 3D only.
 
-  These boxes and the plot are two views of one state. A zoom fills
-    the boxes with the range you zoomed to, so the zoom holds across
-    redraws. You can zoom with a drag box, the wheel, the toolbar or
-    the View pad. Typing a limit and pressing Return does the same as
-    'Apply limits'. Right-click a box to clear it.
+  These boxes and the plot are two views of one state: a zoom with
+    the drag box, the wheel, the toolbar or the View pad fills the
+    boxes, so the zoom holds across redraws. Typing a limit and
+    pressing Return does what 'Apply limits' does. Right-click a box
+    to clear it.
 
-  Reset axes clears all six boxes. It turns auto-fit back on for
-    every redraw. It is the way back after any zoom.
+  Reset axes clears all six boxes and turns auto-fit back on.
 
   Scale: linear or log, independently for X and Y. Log on absorbance
-    drops non-positive points. Log on the spectral axis needs X min
+    drops non-positive points. Log on the spectral axis takes X min
     above 0.
 
 
@@ -65,42 +58,40 @@ AXES > TICKS
     Right-click a box to clear it.
 
   Auto fills the spacing boxes with the values matplotlib uses right
-    now. You can then nudge those values.
+    now.
 
-  Marks: out (ticks point outward), in (inward, the journal
-    convention), or inout (both sides of the axis line).
+  Marks: out, in (the journal convention), or inout.
 
-  Minor ticks: draw them at all. The tool picks automatic positions
-    when the minor spacing box is blank.
+  Minor ticks: draw them at all. Positions are automatic while the
+    minor spacing box is blank.
 
-  Ticks on all sides (2D): mirror ticks onto the top and right
+  Ticks on all sides (2D): mirrors ticks onto the top and right
     spines.
 
-  Tick length major / minor and Tick width, in points. Label font is
-    the tick-number size.
+  Tick length major / minor and Tick width, in points. The label
+    font is the tick-number size.
 
   X format / Y format: fixed decimals (0 = integers, 0.00 = two
-    places) or scientific notation. 'auto' leaves matplotlib's choice
-    alone. 2D linear axes.
+    places) or scientific notation. 'auto' leaves matplotlib's
+    choice alone. 2D linear axes.
 
-  Rotate X: rotate the X tick labels 0 to 90 degrees in 15-degree
-    steps. Use it for dense wavenumber ticks.
+  Rotate X: rotates the X tick labels 0 to 90 degrees, in 15-degree
+    steps.
 
 
 AXES > FRAME & GRID
 
-  The tool styles Major grid and Minor grid independently. Each has
-    its own color, pattern, width and opacity. 'auto' color follows
-    the theme. The minor grid needs minor ticks on to have something
-    to draw against.
+  Major grid and Minor grid style independently, each with its own
+  color, pattern, width and opacity. 'auto' color follows the theme.
+  The minor grid takes minor ticks on to have something to draw
+  against.
 
-  Spines: the three controls that style the box around the plot, in
-    one place.
-      Axis line   thickness in points
-      Axis color  outer spine color in 2D, box edge color in 3D;
-                  'auto' follows the theme
-      Hide top/right spines  the two-spine journal look
+  Spines: the three controls that style the box around the plot.
+    - Axis line: thickness in points.
+    - Axis color: outer spine color in 2D, box edge color in 3D.
+      'auto' follows the theme.
+    - Hide top/right spines: the two-spine journal look.
 
   Journal presets set grid off, spines hidden, ticks in and minor
   ticks on. 'Clean style (no grid, thin spines)' in EXPORT > FIGURE
-  does the same tidy-up. It leaves your fonts and sizes alone.
+  does the same, and leaves the fonts and sizes alone.

@@ -6,11 +6,20 @@ Vendored from `defringe_dac.py` (DAC Absorption Fringe Analysis).
     Author        : Matthew R. Diamond
     Repository    : github.com/matthewrdiamond/DAC-Absorption-Fringe-Analysis
     License       : vendored under MIT by permission of the author.
+    Upstream snapshot: commit 7988300 (2026-08-03)
+
+Deliberate deviations from that snapshot, kept on purpose (hardening; every
+other difference is a bug): drift #4 per-window rejection instead of hot-path
+asserts, #8 point-count / finiteness gate on detection, #9 Fisher p-value
+overflow guard, #10 the 20-point floor extended to the full and wide tiers,
+#13 ValueError on a zero or negative notch half-width.
 
 Contents (source line refs are into defringe_dac.py):
     defringe_fft_notch        (:6479)  multi-centre Gaussian notch + optional low-pass
     notch_width_sweep         (:6568)  residual fringe power vs notch width
     band_integrated_amplitude (:6653)  spread-aware fringe amplitude V
+    lowpass_keep              (:6547)  the low-pass edge, ONE definition
+    removed_profile_um        (:13570) the same mask read on the n*t um axis
 
 Notch-width convention (source, verbatim intent): half-widths are ABSOLUTE
 n*t um (+-reach), NOT a fraction of the centre frequency.  Because the n*t axis
@@ -21,6 +30,11 @@ peaks, whose width is roughly constant across n*t.
 SPARTA adaptations
   * Defaults arrive from a frozen FringeConfig instead of module globals
     (NOTCH_HALFWIDTH_UM, LP_ROLLOFF_UM, BAND_RES_FLOOR).
+  * The low-pass edge is `lowpass_keep`, one function used by BOTH the mask
+    that is applied to the spectrum and the preview curve the workbench
+    draws.  The source spells the same tanh twice (:6547 and :13591), so the
+    two could drift; here a shape or a width can only change in one place.
+    Shape 'tanh' at roll-off 2.0 um is the source's own edge, verbatim.
   * No printing (optional `log=callable`), no import side effects.
   * Input validation with named errors (see the QoL notes on each function).
   * Python 3.8 compatible; numpy + stdlib only.
@@ -28,11 +42,63 @@ SPARTA adaptations
 
 import numpy as np
 
-from fringe_config import DEFAULT_CONFIG, make_logger
+from fringe_config import (DEFAULT_CONFIG, DEFAULT_LP_EDGE_SHAPE,
+                           LP_EDGE_SHAPES, make_logger)
 
 # The n*t (um) axis is freqs/2000, so a half-width of hw um maps to a frequency
 # half-width of 2000*hw.  Named once instead of the source's repeated literal.
 _UM_TO_FREQ = 2000.0
+
+# The roll-off width may not be zero: it divides.  The source's own guard.
+_ROLL_FLOOR = 1e-9
+
+
+def _erf(x):
+    """Vectorised error function, without a hard SciPy dependency.
+
+    SciPy is optional in this tree (the vendored core is numpy + stdlib), so
+    the fast path is used when it is installed and `math.erf` covers the rest.
+    """
+    try:
+        from scipy.special import erf as _sp_erf
+    except Exception:
+        import math
+        return np.array([math.erf(float(v)) for v in np.ravel(x)],
+                        dtype=float).reshape(np.shape(x))
+    return _sp_erf(x)
+
+
+def lowpass_keep(x, cutoff, rolloff=None, shape=None, cfg=None):
+    """The low-pass KEEP factor of the notch mask, on any linear axis.
+
+    One definition, used by the mask that is applied to the spectrum
+    (`defringe_fft_notch`) and by the preview curve the workbench draws
+    (`removed_profile_um`).  `x`, `cutoff` and `rolloff` must share a unit;
+    the n*t um axis is frequency/2000, so the same call serves both spaces.
+
+    Shapes (`shape`, None -> ``cfg.lp_edge_shape``):
+      'tanh'  0.5 * (1 - tanh((x - cutoff) / r))   the source's edge, verbatim
+      'erf'   0.5 * (1 - erf((x - cutoff) / r))    the Gaussian-integral edge
+      'hard'  1 below the cutoff, 0 above it       a plain step
+
+    `rolloff` (None -> ``cfg.lp_rolloff_um``) is the same width parameter for
+    tanh and erf: at one r past the cutoff, tanh keeps 0.119 and erf 0.079.
+    'hard' ignores it.  Returns an array shaped like `x`.
+    """
+    cfg = DEFAULT_CONFIG if cfg is None else cfg
+    shape = cfg.lp_edge_shape if shape is None else str(shape)
+    if shape not in LP_EDGE_SHAPES:
+        raise ValueError("lowpass_keep: shape must be one of %s (got %r)"
+                         % (', '.join(LP_EDGE_SHAPES), shape))
+    x = np.asarray(x, float)
+    cutoff = float(cutoff)
+    if shape == 'hard':
+        return np.where(x <= cutoff, 1.0, 0.0)
+    roll = cfg.lp_rolloff_um if rolloff is None else rolloff
+    r = max(float(roll), _ROLL_FLOOR)
+    if shape == 'erf':
+        return 0.5 * (1.0 - _erf((x - cutoff) / r))
+    return 0.5 * (1.0 - np.tanh((x - cutoff) / r))
 
 
 def _check_grid(wn_u, sig_u, who):
@@ -72,37 +138,25 @@ def _mirror_pad(sig_u):
     return sig_padded, pad, N, len(sig_padded)
 
 
-def _gaussian_notch_mask(freqs, centers_nm, halfwidths_um, default_halfwidth_um,
-                         width_frac=None):
+def _gaussian_notch_mask(freqs, centers_nm, halfwidths_um, default_halfwidth_um):
     """Product of Gaussian notches at f = 2*n*t for each centre (n*t in nm).
 
     Half-widths are absolute n*t um, so sigma_f = 2000*hw at every centre.
-
-    `width_frac` selects the LEGACY fractional convention instead:
-    sigma_f = width_frac * f_center, i.e. a notch that widens with the fringe
-    frequency.  It exists so SPARTA's pre-v1.4.9 `defringe.py` path reproduces
-    bit-for-bit (`2000 * (frac*nt/1000)` and `frac * 2*nt` are equal in real
-    arithmetic but not in IEEE754).  New callers should use half-widths.
+    An empty centre list is a mask of ones: nothing is notched.
     """
     notch = np.ones_like(freqs)
     for idx, c in enumerate(centers_nm):
         fc = 2.0 * float(c)
         if fc <= 0.0:
             continue
-        if width_frac is not None:
-            if float(width_frac) <= 0.0:
-                raise ValueError("notch width_frac must be > 0 (got %r)"
-                                 % (width_frac,))
-            sigma_f = float(width_frac) * fc
-        else:
-            hw = (halfwidths_um[idx] if (halfwidths_um is not None
-                                         and idx < len(halfwidths_um))
-                  else default_halfwidth_um)
-            hw = float(hw)
-            if hw <= 0.0:
-                raise ValueError("notch half-width must be > 0 um (centre %g nm "
-                                 "got %r)" % (fc / 2.0, hw))
-            sigma_f = _UM_TO_FREQ * hw
+        hw = (halfwidths_um[idx] if (halfwidths_um is not None
+                                     and idx < len(halfwidths_um))
+              else default_halfwidth_um)
+        hw = float(hw)
+        if hw <= 0.0:
+            raise ValueError("notch half-width must be > 0 um (centre %g nm "
+                             "got %r)" % (fc / 2.0, hw))
+        sigma_f = _UM_TO_FREQ * hw
         notch *= 1.0 - np.exp(-0.5 * ((freqs - fc) / sigma_f) ** 2)
     return notch
 
@@ -110,7 +164,7 @@ def _gaussian_notch_mask(freqs, centers_nm, halfwidths_um, default_halfwidth_um,
 def defringe_fft_notch(wn_u, sig_u, wl, raw, nt_fft_nm, halfwidth_um=None,
                        notch_centers_nm=None, notch_halfwidths_um=None,
                        lowpass=False, lp_cutoff_um=None, lp_rolloff_um=None,
-                       cfg=None, width_frac=None):
+                       cfg=None, lp_edge_shape=None):
     """Defringe by zeroing the fringe peak in Fourier space.
 
     Works on the uniform-wn signal: FFT, apply Gaussian notch at the fringe
@@ -129,22 +183,23 @@ def defringe_fft_notch(wn_u, sig_u, wl, raw, nt_fft_nm, halfwidth_um=None,
                          sigma_f = 2000*halfwidth_um (the n*t axis is freqs/2000, so a
                          +-hw um band = a +-2000*hw freq band -> +-1 sigma = +-hw um).
                          None -> cfg.notch_halfwidth_um.
-    notch_centers_nm : list|None - explicit list of n*t centers (nm) to notch, each at
-                         f = 2*n*t. When given it OVERRIDES the single-fundamental notch: the
-                         caller supplies the exact set of centers, e.g. the fundamental plus
-                         user-selected peaks. None -> notch the fundamental only.
+    notch_centers_nm : list|None - the caller's own answer, three states.
+                         A LIST of n*t centers (nm) notches exactly those, each at
+                         f = 2*n*t, and `nt_fft_nm` is then not consulted at all.
+                         An EMPTY list notches nothing, so the mask is the low-pass
+                         alone.  None means automatic: notch the detected
+                         fundamental at `nt_fft_nm`.
     notch_halfwidths_um : list|None - per-centre half-widths in n*t um, parallel to
                          notch_centers_nm; missing entries fall back to halfwidth_um.
     lowpass, lp_cutoff_um, lp_rolloff_um : optional soft high-cut ON TOP of the notches - a
-                         single logistic mask multiplied into the same rfft mask,
+                         single soft-edge mask multiplied into the same rfft mask,
                          cutoff/rolloff in n*t um.
+    lp_edge_shape : str|None - the low-pass edge: 'tanh' (the source's own),
+                         'erf' or 'hard'.  None -> cfg.lp_edge_shape.
     cfg : FringeConfig|None - supplies the defaults above.
-    width_frac : float|None - LEGACY fractional width (sigma_f = width_frac *
-                         f_center) instead of the absolute half-widths.  Only
-                         SPARTA's `defringe.py` compatibility shim uses it; new
-                         callers should use `halfwidth_um`.
 
     Returns (I_clean_wl, nt_est, sig_filtered_wn)
+      nt_est is the notch centre this ran at, or None on the explicit-list path.
       sig_filtered_wn is the notch-filtered signal on the wn grid (~ I_laun).
     """
     cfg = DEFAULT_CONFIG if cfg is None else cfg
@@ -155,34 +210,39 @@ def defringe_fft_notch(wn_u, sig_u, wl, raw, nt_fft_nm, halfwidth_um=None,
     if wl.size != raw.size:
         raise ValueError("defringe_fft_notch: wl and raw length mismatch (%d vs %d)"
                          % (wl.size, raw.size))
-    if nt_fft_nm is None or not np.isfinite(nt_fft_nm) or float(nt_fft_nm) <= 0.0:
+    explicit = notch_centers_nm is not None
+    if not explicit and (nt_fft_nm is None or not np.isfinite(nt_fft_nm)
+                         or float(nt_fft_nm) <= 0.0):
+        # Only the automatic path reads the fundamental, so only it needs one.
         raise ValueError("defringe_fft_notch: nt_fft_nm must be a positive, finite "
                          "n*t in nm (got %r)" % (nt_fft_nm,))
 
-    f_center = 2.0 * float(nt_fft_nm)     # fringe frequency in wn^-1 space
+    # fringe frequency in wn^-1 space (automatic path only)
+    f_center = None if explicit else 2.0 * float(nt_fft_nm)
 
     sig_padded, pad, N, N_pad = _mirror_pad(sig_u)
     S = np.fft.rfft(sig_padded)
     freqs = np.fft.rfftfreq(N_pad, d=dw)
 
     # Gaussian notch(es): attenuate around the fringe frequency.
-    # An explicit center list (n*t in nm) notches exactly those centers (each f = 2*n*t);
-    # otherwise notch just the fundamental at f_center. Half-widths are ABSOLUTE (um +-reach),
-    # so sigma_f = 2000*halfwidth_um (-> +-1 sigma = +-hw um) is the same at every centre
-    # regardless of position -- matching real FFT fringe peaks, whose width is ~constant
-    # across n*t.
-    centers = (notch_centers_nm if notch_centers_nm is not None
-               else [float(nt_fft_nm)])
-    widths = notch_halfwidths_um if notch_centers_nm is not None else None
-    notch = _gaussian_notch_mask(freqs, centers, widths, halfwidth_um,
-                                 width_frac=width_frac)
+    # An explicit center list (n*t in nm) notches exactly those centers (each f = 2*n*t),
+    # and an EMPTY one notches nothing; only None falls back to the fundamental at
+    # f_center. Half-widths are ABSOLUTE (um +-reach), so sigma_f = 2000*halfwidth_um
+    # (-> +-1 sigma = +-hw um) is the same at every centre regardless of position --
+    # matching real FFT fringe peaks, whose width is ~constant across n*t.
+    centers = notch_centers_nm if explicit else [float(nt_fft_nm)]
+    widths = notch_halfwidths_um if explicit else None
+    notch = _gaussian_notch_mask(freqs, centers, widths, halfwidth_um)
 
-    # Optional soft low-pass composed into the same mask (applied once). tanh edge, not a hard
+    # Optional soft low-pass composed into the same mask (applied once). A soft edge, not a hard
     # cut, so the mirror-padded irfft doesn't ring. cutoff/rolloff are n*t um -> freq via *2000.
+    # `lowpass_keep` is the one definition of that edge; the workbench's preview curve reads the
+    # same function on the um axis, so what is drawn is what is applied.
     if lowpass and lp_cutoff_um and lp_cutoff_um > 0:
         f_cut = _UM_TO_FREQ * float(lp_cutoff_um)
         roll = _UM_TO_FREQ * float(lp_rolloff_um or cfg.lp_rolloff_um)
-        notch = notch * 0.5 * (1.0 - np.tanh((freqs - f_cut) / max(roll, 1e-9)))
+        notch = notch * lowpass_keep(freqs, f_cut, roll, lp_edge_shape,
+                                     cfg=cfg)
 
     sig_filtered_padded = np.fft.irfft(S * notch, n=N_pad)
 
@@ -197,8 +257,8 @@ def defringe_fft_notch(wn_u, sig_u, wl, raw, nt_fft_nm, halfwidth_um=None,
     fringe_on_wl = np.interp(wn_wl, wn_u, fringe_wn)
     I_clean = raw - fringe_on_wl
 
-    # Estimate n*t from the notch centre
-    nt_est = f_center / 2.0
+    # Estimate n*t from the notch centre (the explicit path never had one)
+    nt_est = None if f_center is None else f_center / 2.0
 
     return I_clean, nt_est, sig_filtered
 
@@ -345,6 +405,42 @@ def band_integrated_amplitude(wn_u, norm_u, nt, halfwidth_um=None,
     return float(np.sqrt(np.sum(np.abs(X[band]) ** 2) / K))
 
 
+def removed_profile_um(x_um, centers_um=None, halfwidths_um=None,
+                       lowpass=False, lp_cutoff_um=None, lp_rolloff_um=None,
+                       lp_edge_shape=None, cfg=None):
+    """The mask's REMOVED fraction over an n*t um grid (source `_removed_fraction`, :13570).
+
+    ``1 - (prod notch_keep) * lowpass_keep``, i.e. exactly the mask
+    `defringe_fft_notch` multiplies into the rfft, read on the axis the panel
+    plots.  0 means kept, 1 means fully removed.
+
+    The two spaces agree by construction, not by copying: the x axis is
+    frequency/2000 and each notch's sigma_f is 2000*hw, so in um the Gaussian's
+    sigma IS its +-reach `hw` and its centre IS the centre in um.  The low-pass
+    half comes from :func:`lowpass_keep`, the same function the mask calls.
+
+    `centers_um` are n*t centres in um (not nm), parallel to `halfwidths_um`;
+    a missing width falls back to ``cfg.notch_halfwidth_um``.
+    """
+    cfg = DEFAULT_CONFIG if cfg is None else cfg
+    x = np.asarray(x_um, float)
+    keep = np.ones_like(x)
+    centers_um = [] if centers_um is None else list(centers_um)
+    for idx, c in enumerate(centers_um):
+        hw = (halfwidths_um[idx] if (halfwidths_um is not None
+                                     and idx < len(halfwidths_um))
+              else cfg.notch_halfwidth_um)
+        hw = float(hw)
+        if hw <= 0.0:
+            raise ValueError("removed_profile_um: notch half-width must be "
+                             "> 0 um (centre %g um got %r)" % (float(c), hw))
+        keep = keep * (1.0 - np.exp(-0.5 * ((x - float(c)) / hw) ** 2))
+    if lowpass and lp_cutoff_um and float(lp_cutoff_um) > 0:
+        keep = keep * lowpass_keep(x, float(lp_cutoff_um), lp_rolloff_um,
+                                   lp_edge_shape, cfg=cfg)
+    return 1.0 - keep
+
+
 def removed_fraction(sig_u, sig_filtered):
     """Fraction of the signal's variance removed by the notch (SPARTA helper).
 
@@ -364,4 +460,5 @@ def removed_fraction(sig_u, sig_filtered):
 
 
 __all__ = ['defringe_fft_notch', 'notch_width_sweep', 'band_integrated_amplitude',
-           'removed_fraction', 'make_logger']
+           'lowpass_keep', 'removed_profile_um', 'removed_fraction',
+           'LP_EDGE_SHAPES', 'DEFAULT_LP_EDGE_SHAPE', 'make_logger']

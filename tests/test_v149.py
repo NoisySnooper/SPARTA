@@ -6,7 +6,7 @@ What is locked here is the contract, not the pixels:
     their own settings keys, and REALLY reach the drawn Line2D (pattern,
     width, opacity, marker, and the marker thinning on a long curve);
   - the defaults still reproduce the historical look (dashed, same width);
-  - Thickness mode draws one point per trace from defringe's own detector,
+  - Thickness mode draws one point per trace from the fringe detector,
     breaks its line at a non-detection and marks it, and never lets the 3D
     ridge hijack it;
   - alpha = ln(10)*A/t_cm is numerically right, in cm^-1, and t propagates
@@ -21,7 +21,7 @@ import numpy as np
 import pytest
 
 import app
-import defringe
+import fringe_apply
 import formulas as F
 from conftest import ROOT, gui, offscreen, quiesce, shared_app
 
@@ -102,10 +102,13 @@ def _lines_by_label(a):
 # the synthetic data really is what the tests assume
 # ---------------------------------------------------------------------------
 def test_the_fixtures_are_detected_and_refused_as_intended():
-    r = defringe.defringe_channel(WL, _fringed())
+    r = fringe_apply.clean_channel(WL, _fringed())
     assert r["applied"] and abs(r["nt_um"] - NT_NM * 1e-3) < 0.5
-    r = defringe.defringe_channel(WL, _unfringed())
+    r = fringe_apply.clean_channel(WL, _unfringed())
     assert not r["applied"] and r["nt_um"] is None
+    nt, _pv = fringe_apply.detect_nt(WL, _fringed())
+    assert nt is not None and abs(nt - NT_NM * 1e-3) < 0.5
+    assert fringe_apply.detect_nt(WL, _unfringed())[0] is None
 
 
 # ---------------------------------------------------------------------------
@@ -258,7 +261,7 @@ def test_decomp_defaults_and_overrides_reach_the_drawn_line(a):
 # ---------------------------------------------------------------------------
 def test_thickness_rows_plot_table_and_cache(a):
     """One load, one detection pass, everything Thickness mode promises:
-    the rows match defringe's own detector, the gates own the cache, the
+    the rows match the fringe detector, the gates own the cache, the
     plot breaks its line at a miss and marks it, the axis labels follow the
     Series variable, the 3D ridge cannot hijack the mode, the D branch takes
     the decompression style, and the table lists every trace."""

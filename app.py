@@ -48,7 +48,7 @@ from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 (enables 3d projection)
 import engine
 import guide_tour
 import smoothing
-import defringe
+import fringe_apply
 import colormaps
 import decomp
 import formulas
@@ -82,6 +82,10 @@ SMOOTH_INT_BOUNDS = {"density_win": (1, 100000), "density_min": (0, 100000),
                      "jump_buff": (0, 100000)}
 TOOL_DIR = os.path.dirname(os.path.abspath(__file__))
 SETTINGS_PATH = os.path.join(TOOL_DIR, ".quicklook_settings.json")
+# Where a Tk callback traceback goes when there is no console to print
+# it on. The packaged build is a windowed exe: stderr is a hole, and a
+# callback that died used to take its traceback down with it (R17 F1).
+ERROR_LOG_PATH = os.path.join(TOOL_DIR, "sparta_errors.log")
 FONTS = ["Jost", "Segoe UI", "DejaVu Sans", "DejaVu Serif",
          "Times New Roman", "Arial", "Calibri", "Cambria", "Georgia",
          "Consolas"]
@@ -94,6 +98,13 @@ LEG_OUTSIDE = {"outside right": ((1.02, 1.0), "upper left"),
                "outside left": ((-0.02, 1.0), "upper right"),
                "outside top": ((0.5, 1.02), "lower center"),
                "outside bottom": ((0.5, -0.08), "upper center")}
+
+# R17 F3. A formula written over A is raw by design and reads to the user as
+# "the defringe switch does nothing". Said once, here, and printed wherever
+# the program lists the column symbols.
+DF_SYMBOL_NOTE = ("A, S, B and D are the raw channels: the defringed "
+                  "variants are Af, Sf and Bf, and only they follow the "
+                  "Defringe switch.")
 
 # Right-panel layout vocabulary. One label-gutter width and three row
 # paddings, so the first column of every section lines up instead of
@@ -161,8 +172,65 @@ XVAR_PRESETS = [("Pressure (GPa)", "Pressure", "GPa"),
 JOURNAL_ALIASES = {"square (5 in)": "Square (5 in)",
                    "wide (10 x 4 in)": "Wide (10 x 4 in)"}
 
-APP_VERSION = "v1.4.9"
+APP_VERSION = "v1.5.0"
 APP_CODENAME = "Olivine"
+
+# The one list of data files SPARTA writes, in the order they are
+# written and the order EXPORT > DATA FILES shows them. Absorbance is
+# the reduction's own file and is always written; the other four are
+# ticks. They persist in SETTINGS under "export_products" because they
+# are an OUTPUT preference, not figure state: applying somebody else's
+# preset must never change what a Run puts on disk (rule 30).
+EXPORT_PRODUCT_ORDER = ("absorbance", "defringed", "smoothed",
+                        "formula", "cd_tagged")
+EXPORT_PRODUCT_DEFAULTS = {"defringed": True, "smoothed": False,
+                           "cd_tagged": False, "formula": False}
+# R20: a ticked product is no longer a file of its own. Three of them add
+# COLUMNS to the trace's own absorbance CSV, in this order, and the fourth
+# (cd_tagged) is a rule about that file's NAME. One CSV per trace, so a
+# folder never holds three spellings of the same measurement again.
+EXPORT_COLUMN_ORDER = ("defringed", "smoothed", "formula")
+NOTCH_COLUMNS = ("Absorbance_notch", "Background_notch", "Sample_notch")
+SMOOTH_COLUMNS = ("Absorbance_smoothed", "Absorbance_notch_smoothed")
+# The five rows of EXPORT > DATA FILES, top to bottom. The section and the
+# Export dialog build from the same three maps and bind to the same
+# variables, so the two surfaces cannot drift apart.
+EXPORT_ROW_ORDER = ("absorbance", "defringed", "smoothed", "formula",
+                    "cd_tagged")
+EXPORT_ROW_LABELS = {"absorbance": "Absorbance data (always)",
+                     "defringed": "Defringed data",
+                     "smoothed": "Smoothed data",
+                     "formula": "Formula values",
+                     "cd_tagged": "C/D tag in file name"}
+EXPORT_ROW_TIPS = {
+    "absorbance":
+        "The reduction's base columns: Wavelength_nm, Wavenumber_cm-1, "
+        "Absorbance, Dark, Background, Sample. Run always writes them.",
+    "defringed":
+        "Adds Absorbance_notch, Background_notch and Sample_notch: "
+        "FFT-notch cleaning at each trace's own notch list from FRINGE > "
+        "FFT REMOVAL, or at the global controls. A channel with no "
+        "detected fringe leaves its two channel columns blank. The df "
+        "switch changes the plot only.",
+    "smoothed":
+        "Adds Absorbance_smoothed (and Absorbance_notch_smoothed with "
+        "Defringed on) at the current DATA > SMOOTHING settings.",
+    "formula":
+        "Adds one column with the active formula from DATA > FORMULAS. "
+        "With no formula active the column is skipped and the log says "
+        "so.",
+    "cd_tagged":
+        "Puts _C or _D in every file name after the D toggles and the D "
+        "list. Off, a name carries the letter only when the raw file name "
+        "did."}
+EXPORT_DATA_TIP = ("Write the CSV of every loaded trace into a folder: the "
+                   "same columns a Run writes, plus a wavelength crop.")
+EXPORT_CROP_TIP = ("Keep only the rows inside a wavelength range, in every "
+                   "column: the low and the high edge in nm. It applies to "
+                   "this export alone, never to a Run, and it is not "
+                   "remembered.")
+EXPORT_SYNC_NOTE = "These ticks also set what Run writes."
+EXPORT_NO_DATA_NOTE = "No traces loaded. Run a folder first."
 
 # Line-style and point-marker vocabularies. Both are display -> matplotlib
 # code maps, so the settings and presets store the SHORT code while the
@@ -322,46 +390,51 @@ def _resolve_app_font(value):
 INFO_TEXT = (
     (
     "ABSORBANCE\n"
-    "  A = -log10[(Sample - Dark) / (Background - Dark)]\n"
+    "\n"
+    "      A = -log10[(Sample - Dark) / (Background - Dark)]\n"
     "\n"
     "X-AXIS UNITS\n"
-    "  wavenumber[cm^-1] = 1e7 / wavelength[nm]\n"
-    "  energy[eV]        = 1239.84 / wavelength[nm]\n"
     "\n"
-    "FILENAME FORMAT  (the built-in default)\n"
-    "  vis_{DAC}_{Sample}[_{Pressure}][_bg|_s][_C|_D][_2|_3][.{seq}]\n"
-    "    bare name = dark,  _bg = background,  _s = sample\n"
-    "    _C/_D = optional compression/decompression tag (auto-detects branch)\n"
-    "    _2/_3 = retake (the latest one is used)\n"
-    "    seq = 001, 002, ... (any number of grating segments);\n"
-    "      omit .seq for single-stitch files\n"
-    "    (_C/_D and _2/_3 may appear in either order)\n"
-    "    Pressure uses 'p' for the decimal: 1p39 = 1.39 GPa. 0 GPa is\n"
-    "      allowed. A missing pressure field reads as 0 GPa (noted in log)\n"
-    "  Absorbance needs S + B + D. An incomplete channel set, such as\n"
-    "  bg alone, loads as raw counts. The trace name carries a channel\n"
-    "  tag.\n"
-    "  The tool skips other files (see the log above).\n"
+    "      wavenumber[cm^-1] = 1e7 / wavelength[nm]\n"
+    "      energy[eV]        = 1239.84 / wavelength[nm]\n"
+    "\n"
+    "FILENAME FORMAT\n"
+    "  The built-in default reads:\n"
+    "\n"
+    "      vis_{DAC}_{Sample}[_{Pressure}][_bg|_s][_C|_D][_2|_3][.{seq}]\n"
+    "\n"
+    "  A bare name is the dark, _bg the background, _s the sample.\n"
+    "  _C and _D tag compression and decompression, and set the\n"
+    "    branch.\n"
+    "  _2 and _3 mark a retake. The latest one is used. The two pairs\n"
+    "    appear in either order.\n"
+    "  seq is 001, 002 and on, one per grating segment. A\n"
+    "    single-stitch file omits .seq.\n"
+    "  Pressure uses 'p' for the decimal: 1p39 = 1.39 GPa. 0 GPa is\n"
+    "    allowed. A missing pressure field reads as 0 GPa, and the log\n"
+    "    says so.\n"
+    "  Absorbance takes S + B + D. An incomplete set, such as bg\n"
+    "    alone, loads as raw counts under a channel tag. SPARTA skips\n"
+    "    the other files and logs the reason.\n"
     "\n"
     "ANOTHER NAMING SCHEME\n"
-    "  The grammar above is the built-in default. 'Name format'\n"
-    "  (left panel) teaches any scheme from one example file. It\n"
-    "  teaches token order, keywords and segment numbering (digits or\n"
-    "  letters, any separator, strict or assumed-1 when absent). It\n"
-    "  also teaches a default DAC and sample for pieces the names\n"
-    "  omit. 'Guess format' reads the folder and proposes it all.\n"
-    "  You can fix or exclude stubborn files by hand, and the tool\n"
-    "  remembers them per folder.\n"
+    "  'Name format' (left panel) teaches any other scheme from one\n"
+    "    example file, and 'Guess format' proposes one from the\n"
+    "    folder. See LEFT PANEL > NAME FORMAT in the panel guide.\n"
     "\n"
     "BRANCHES (C / D)\n"
-    "  C = compression,  D = decompression (styled apart; see PLOT >\n"
-    "  2D plot options > Decompression traces).\n"
-    "  It is automatic for known experiments and _C/_D tags. Otherwise\n"
-    "  toggle D per trace.\n"
+    "  C = compression, D = decompression. SPARTA reads the branch\n"
+    "    from known experiments and from _C/_D tags. Toggle D per\n"
+    "    trace for the rest. The D style is in PLOT > 2D plot\n"
+    "    options.\n"
     "\n"
     "OUTPUT\n"
-    "  CSVs go to an auto-named subfolder inside the output folder\n"
-    "  you pick, for example  <output>/<inputname>_absorbance/."
+    "  Run writes one CSV per measurement to an auto-named subfolder\n"
+    "    of the output folder, for example\n"
+    "    <output>/<inputname>_absorbance/.\n"
+    "  The ticks in EXPORT > DATA FILES pick the columns that CSV\n"
+    "    carries. 'Export data\u2026' (Ctrl+E) writes the same columns\n"
+    "    into any folder."
 )
 )
 
@@ -369,581 +442,548 @@ QUICK_START = (
     (
     "QUICK START\n"
     "\n"
-    "1. Pick the Input folder of raw segment files (vis_..._001..004).\n"
-    "   For a different filename scheme, click 'Name format' under the\n"
-    "   folder box and teach it from one example file.\n"
-    "2. Pick an Output folder, then click Run. The tool joins the grating\n"
-    "   segments of each measurement, computes absorbance, and writes\n"
-    "   one CSV per measurement to <output>/<inputname>_absorbance/.\n"
-    "3. All traces plot automatically. Format them on the right panel.\n"
-    "   It holds six tabs: Plot, Axes, Style, Data, Fringe, Export.\n"
-    "   Each tab is a stack of sections. 'Find a setting' at the\n"
-    "   top opens whichever section holds a control. Click a curve to\n"
-    "   select it. Right-click it for quick actions.\n"
-    "4. For a publication figure, pick a Journal preset (Nature /\n"
-    "   Science / RSI / APS / Elsevier) in the Figure box. It sets the\n"
-    "   column width AND the house style (font, sizes, line weight,\n"
-    "   spines, DPI) in one pick. Tick 'Preview at export size\n"
-    "   (WYSIWYG)' to see the true printed proportions and text size\n"
-    "   on screen.\n"
-    "5. Save the plot as PDF or SVG (vector), or as PNG at the chosen\n"
-    "   DPI.\n"
+    "1. Select the Input folder of raw segment files\n"
+    "   (vis_..._001..004). For another filename scheme, click 'Name\n"
+    "   format' under the folder box and teach it from one example\n"
+    "   file.\n"
+    "2. Select an Output folder and click Run. SPARTA joins the\n"
+    "   grating segments of each measurement, computes absorbance, and\n"
+    "   writes one CSV per measurement to\n"
+    "   <output>/<inputname>_absorbance/. The ticks in Export tab >\n"
+    "   Data files pick the columns that CSV carries.\n"
+    "3. Every trace plots at once, and the right panel formats it. It\n"
+    "   holds six tabs: Plot, Axes, Style, Data, Fringe and Export.\n"
+    "   Each tab is a stack of sections. 'Find a setting' at the top\n"
+    "   opens the section that holds a control. Click a curve to\n"
+    "   select it, and right-click it for quick actions.\n"
+    "4. For a publication figure, select a Journal preset (Nature,\n"
+    "   Science, RSI, APS or Elsevier) in EXPORT > FIGURE. It sets the\n"
+    "   column width and the house style: font, sizes, line weight,\n"
+    "   spines and DPI. 'Preview at export size (WYSIWYG)' shows the\n"
+    "   printed proportions and text size on screen.\n"
+    "5. Save the plot from EXPORT > EXPORT as PDF or SVG (vector), or\n"
+    "   as PNG at the chosen DPI. 'Export\u2026' in the left panel,\n"
+    "   Ctrl+E, and 'Export data\u2026' in Export tab > Data files all\n"
+    "   open the Export dialog: the same columns into any folder,\n"
+    "   plus a wavelength crop for that export alone.\n"
     "\n"
-    "SESSION TABS (above the plot): each tab is a separate session. '+'\n"
-    "  opens a blank tab to Run or load another dataset for side-by-side\n"
-    "  comparison. Double-click to rename; Ctrl+T new, Ctrl+W close,\n"
-    "  Ctrl+Tab to cycle.\n"
-    "DATA TABLE (button, bottom-right, or Ctrl+D): the raw numbers for the\n"
-    "  selected trace. Drag its top edge to resize, copy as TSV, or open\n"
-    "  in Excel. The Data TAB of the right panel is a different thing; it\n"
-    "  holds Smoothing, Traces and Formulas.\n"
-    "'Load previous run' (left) reopens a finished output folder at once.\n"
-    "  Recent runs are also listed on a blank tab. The arrow beside each\n"
-    "  Browse button drops down your last 5 folders. On Windows you can\n"
-    "  drag a folder from Explorer straight onto the window.\n"
-    "WHILE YOU MEASURE: Rescan (or F5) re-runs the folder when new files\n"
-    "  appeared. The Auto rescan pill in the Plot tab does it unattended\n"
-    "  every N seconds. The status line reads 'auto-rescan: N s' while the\n"
-    "  timer is armed.\n"
-    "YOUR OWN QUANTITIES: Formulas (Data tab) computes anything you can\n"
-    "  write as arithmetic over the loaded columns. It plots the result\n"
-    "  on the Y axis and exports it as its own CSVs.\n"
-    "\n"
-    "Hover any control for a tip. Helper tips in the top bar's\n"
-    "Settings panel turns the tips on and off. F1 lists the\n"
-    "keyboard shortcuts. Text size sits in that same panel. Theme\n"
-    "sits on the top bar.\n"
-    "The tool remembers folders, theme, window size, default colormap,\n"
-    "notes, and presets between launches."
+    "Rescan, or F5, re-runs the folder when new files appeared.\n"
+    "  'Load previous run' reopens a finished output folder instead.\n"
+    "Hover any control for a tip. F1 lists the keyboard shortcuts.\n"
+    "  The View dropdown above this box opens the panel guide, which\n"
+    "  covers every section and every control."
 )
 )
 
 PANEL_GUIDE = (
     "PANEL GUIDE\n"
     "\n"
-    "The right panel is six tabs: Plot, Axes, Style, Data, Fringe and\n"
-    "  Export. Each tab is a stack of sections you can fold shut. Every\n"
+    "The right panel holds six tabs: Plot, Axes, Style, Data, Fringe\n"
+    "  and Export, each a stack of sections that fold shut. Every\n"
     "  heading below names its home, tab first: 'PLOT > PLOT MODE' is\n"
-    "  the Plot mode section on the Plot tab. Headings that begin LEFT\n"
-    "  PANEL, TOP BAR or PLOT AREA sit outside the right panel.\n"
-    "  Three things here are called data. The DATA TAB is the fourth\n"
-    "  tab of the right panel. The DATA TABLE is the spreadsheet\n"
-    "  drawer under the plot. A SESSION TAB is one of the browser-style\n"
-    "  tabs above the plot.\n"
-    "  'Find a setting' at the top of the panel opens whichever section\n"
-    "  holds a control. It folds the rest away. Collapse all and Reset\n"
-    "  all are on the row under it. Each section remembers whether you\n"
-    "  left it open. With Collapse all pressed, every section header\n"
-    "  becomes a handle: drag it up or down to rearrange that tab. The\n"
-    "  order sticks between launches. Tabs and the main buttons carry a\n"
-    "  small glyph, and the label is still the control.\n"
+    "  the Plot mode section of the Plot tab. LEFT PANEL, TOP BAR and\n"
+    "  PLOT AREA sit outside the right panel.\n"
+    "  Three things carry the name data: the DATA TAB is the fourth\n"
+    "  tab, the DATA TABLE is the drawer under the plot, a SESSION TAB\n"
+    "  is one of the tabs above the plot.\n"
+    "  'Find a setting' opens the section that holds a control and\n"
+    "  folds the rest away; Collapse all and Reset all sit under it.\n"
+    "  Each section remembers whether it was left open, and under\n"
+    "  Collapse all a section header drags to reorder its tab. 'Reset\n"
+    "  section order' undoes the dragging.\n"
     "  Quick Access, the strip above the tabs, holds second copies of\n"
-    "  the controls you reach for constantly.\n"
-    "  The gear in its bottom-right corner opens a two-column\n"
-    "  checklist, and the strip rebuilds live as you tick. CONTROLS on\n"
-    "  the left are settings (Stacked & 3D mode, colormap, axes, the\n"
-    "  series variable, legend / colorbar / grid, and more). ESSENTIAL\n"
-    "  FUNCTIONS on the right are one-press actions. They are Run,\n"
-    "  Rescan, Open output, Load previous run, Data table and Save\n"
-    "  plot. They are also Copy figure, Export STL, Thickness table,\n"
-    "  Smoothing settings, Absorbance readout and Decompression list.\n"
-    "  They join the strip as small labelled buttons under a rule.\n"
-    "  A fresh install starts with an empty function list.\n"
-    "  'Reset to default' in the same window brings back the classic\n"
-    "  strip. 'Reset section order' undoes the dragging.\n"
+    "  frequently used controls; its gear opens a two-column\n"
+    "  checklist. CONTROLS are settings: Stacked & 3D mode, colormap,\n"
+    "  axes, the series variable, legend, colorbar, grid and more.\n"
+    "  ESSENTIAL FUNCTIONS are one-press actions: Run, Rescan, Open\n"
+    "  output, Load previous run, Data table, Save plot, Copy figure,\n"
+    "  Export STL, Thickness table, Smoothing settings, Absorbance\n"
+    "  readout, Decompression list. A fresh install pins none, and\n"
+    "  'Reset to default' restores the classic strip.\n"
     "\n"
     "PLOT AREA > SESSION TABS\n"
     "  Each tab is an independent session with its own data, folders,\n"
-    "    settings and undo history. '+' opens a blank tab. Double-click\n"
-    "    a tab to rename it. The x or a middle-click closes it. Running\n"
-    "    or loading data names the tab after the folder. NUKE clears\n"
-    "    every tab to one.\n"
+    "    settings and undo history. '+' opens a blank tab,\n"
+    "    double-click renames, the x or a middle-click closes. A Run\n"
+    "    or a load names the tab after the folder. NUKE clears every\n"
+    "    tab to one.\n"
     "\n"
     "PLOT AREA > DATA TABLE\n"
     "  The Data table button (bottom right, or Ctrl+D) opens a\n"
     "    spreadsheet of the selected trace: wavelength, wavenumber,\n"
-    "    absorbance and the raw dark / background / sample counts. It\n"
-    "    adds the defringed and smoothed columns when those toggles are\n"
-    "    on. Drag its top edge to resize. 'Copy all (TSV)' pastes into\n"
-    "    Excel. 'Open in Excel' saves a CSV and opens it.\n"
+    "    absorbance, the raw dark, background and sample counts, and\n"
+    "    the defringed and smoothed columns when those toggles are on.\n"
+    "    Drag its top edge to resize. 'Copy all (TSV)' pastes into\n"
+    "    Excel; 'Open in Excel' saves a CSV and opens it.\n"
     "  The status line on the same bar reads the active tab, the plot\n"
-    "    mode and the preset. It also reads how many traces are shown.\n"
-    "    While the poll timer is armed it reads 'auto-rescan: N s'.\n"
+    "    mode, the preset, how many traces are shown, and\n"
+    "    'auto-rescan: N s' while the poll timer is armed.\n"
     "\n"
     "LEFT PANEL > FOLDERS\n"
-    "  Input folder, Output folder, then Run. Both folder cards fold\n"
-    "    shut by their title, so a path you have set costs one row.\n"
-    "  The small arrow beside each Browse button drops down your last 5\n"
-    "    folders plus 'Open in Explorer'. A right-click in the box does\n"
-    "    the same.\n"
-    "  On Windows you can also drag a folder from Explorer onto the\n"
-    "    window. It becomes the input folder and the tool rescans at\n"
-    "    once. Drop a file and the tool uses its containing folder.\n"
-    "  'Load previous run' reopens a finished output folder and\n"
-    "    plots its CSVs. Recent runs are also listed on a blank\n"
-    "    tab.\n"
+    "  Input folder, Output folder, then the button row: Run, then\n"
+    "    'Export…' and 'Open output'. 'Export…' opens the Export\n"
+    "    dialog described under EXPORT > DATA FILES, and Ctrl+E opens\n"
+    "    the same one. 'Open output' opens the last Run's subfolder.\n"
+    "  Both cards fold shut by their title. The arrow beside each\n"
+    "    Browse button drops down the last 5 folders plus\n"
+    "    'Open in Explorer'; a right-click in the box does the same.\n"
+    "    On Windows a folder dragged from Explorer becomes the input\n"
+    "    folder and SPARTA rescans at once, and a dropped file\n"
+    "    contributes its folder. 'Load previous run' reopens a\n"
+    "    finished output folder and plots its CSVs; recent runs are\n"
+    "    also listed on a blank tab.\n"
     "\n"
     "LEFT PANEL > RESCAN\n"
-    "  Rescan (beside 'Load previous run') re-runs the folder when\n"
-    "    files appeared since the last Run. It is the\n"
-    "    between-measurements top-up. F5 does the same. Enter in the\n"
-    "    input-folder box rescans and files that folder in the recent\n"
-    "    list.\n"
-    "  The unattended version is the Auto rescan pill in PLOT > PLOT MODE.\n"
+    "  Rescan, beside 'Load previous run', re-runs the folder when\n"
+    "    files appeared since the last Run; F5 does the same. Enter in\n"
+    "    the input-folder box rescans and files that folder in the\n"
+    "    recent list. The unattended version is the Auto rescan pill\n"
+    "    in PLOT > PLOT MODE.\n"
     "\n"
     "LEFT PANEL > NAME FORMAT\n"
-    "  How filenames are understood. The built-in profile reads the classic\n"
-    "    vis_{DAC}_{Sample}[_{Pressure}][_bg|_s][_C|_D][_2|_3][.{seq}] names.\n"
-    "  For a different scheme, open 'Name format', pick an example\n"
-    "    filename, and label each piece (DAC / sample / value / role /\n"
-    "    ...). The whole folder previews live: green = parsed, red =\n"
-    "    skipped. Save it as a named profile, and Run uses it.\n"
-    "  The value column and the value labels in that window follow the\n"
-    "    Series variable (PLOT > PLOT MODE). What is parsed and stored\n"
-    "    is the same either way.\n"
-    "  For stubborn files, double-click one in the preview to fix its\n"
-    "    fields by hand, or exclude it. The tool remembers fixes per\n"
-    "    folder.\n"
+    "  How filenames are read. The built-in profile reads\n"
+    "    vis_{DAC}_{Sample}[_{Pressure}][_bg|_s][_C|_D][_2|_3][.{seq}].\n"
+    "  For another scheme, open 'Name format', pick an example\n"
+    "    filename, and label each piece: DAC, sample, value, role and\n"
+    "    the rest. It also takes the segment numbering (digits or\n"
+    "    letters, any separator, strict or assumed-1 when absent) and\n"
+    "    a default DAC and sample. 'Guess format' proposes all of it\n"
+    "    from the folder. The folder previews live, green = parsed and\n"
+    "    red = skipped. Save it as a named profile and Run uses it.\n"
+    "  The value column and its labels follow the Series variable\n"
+    "    (PLOT > PLOT MODE); only the labels change.\n"
+    "  Double-click a file in the preview to correct its fields or\n"
+    "    exclude it. SPARTA remembers the corrections per folder.\n"
     "\n"
     "LEFT PANEL > PROGRESS AND GUIDE / NOTES\n"
-    "  Progress logs every run, rescan and action. 'Copy log' takes the\n"
-    "    lot. 'Export settings' prints the current plot configuration,\n"
-    "    so you can paste it into a methods section.\n"
-    "  Guide / notes is this box. The View dropdown switches between\n"
-    "    the quick start, the absorbance formulas, this guide and the\n"
-    "    shortcut list. It also reaches 'My notes', a scratchpad saved\n"
-    "    between launches. Both cards fold shut by their title.\n"
-    "  The gear beside the View dropdown sets this box's own font and\n"
-    "    size.\n"
+    "  Progress logs every run, rescan and action. 'Copy log' takes\n"
+    "    the lot; 'Export settings' prints the current plot\n"
+    "    configuration for a methods section.\n"
+    "  Guide / notes is this box. It opens on 'My notes', a\n"
+    "    scratchpad saved between launches, and the View dropdown\n"
+    "    reaches the quick start, the absorbance reference, this\n"
+    "    guide and the shortcut list. The box remembers the last view\n"
+    "    picked. The gear beside it sets this box's own font and\n"
+    "    size. Both cards fold shut by their title.\n"
     "\n"
     "TOP BAR > THEME\n"
-    "  The six above the divider are the working themes. They are\n"
-    "    Standard Light, Kinda Dark, Black Hole, High Contrast,\n"
-    "    Colorblind Safe and Colorblind Safe Dark. The two Colorblind\n"
-    "    Safe themes use the Okabe-Ito palette. One sits on a white\n"
-    "    ground and one sits on a dark ground. Everything below the\n"
-    "    line changes colors only. The plot itself stays neutral\n"
-    "    until 'Tint plot with theme' is on (STYLE > COLORS &\n"
-    "    COLORMAP).\n"
+    "  The six above the divider are the working themes: Standard\n"
+    "    Light, Kinda Dark, Black Hole, High Contrast, Colorblind Safe\n"
+    "    and Colorblind Safe Dark. The two Colorblind Safe themes use\n"
+    "    the Okabe-Ito palette, one on a white ground and one on a\n"
+    "    dark ground. Everything below the line changes colors only,\n"
+    "    and the plot stays neutral until 'Tint plot with theme' is on\n"
+    "    (STYLE > COLORS & COLORMAP).\n"
     "\n"
     "TOP BAR > SETTINGS\n"
-    "  The gear beside Theme opens the Settings panel. Esc shuts it. A\n"
-    "    click outside shuts it too.\n"
-    "  Font sets the typeface of every button, label and control. Jost\n"
-    "    is the standard face. OpenDyslexic is the dyslexia-friendly\n"
-    "    face. The list shows the faces this computer has.\n"
-    "  Text size sets the size of every button, label and control\n"
-    "    (3-15). 'auto' takes it from the screen and the Windows\n"
-    "    display scale.\n"
-    "  Helper tips is the master switch for the hover tips.\n"
-    "  Performance mode suits a slower machine. It changes the pane\n"
-    "    dividers. A thin guide line follows the cursor. The panes\n"
-    "    resize once, when you let go. The 3D box has its own\n"
-    "    'Performance mode (faster 3D)'.\n"
-    "  Tutorial starts the guided tour.\n"
-    "  About names the build, the license and the people behind it.\n"
-    "  Every setting here applies live. The tool remembers all of them.\n"
+    "  The gear beside Theme opens the Settings panel; Esc, or a click\n"
+    "    outside, shuts it. Every setting applies live and holds\n"
+    "    between launches.\n"
+    "  Font sets the typeface of every button, label and control, from\n"
+    "    the faces this computer has: Jost is the standard face,\n"
+    "    OpenDyslexic the dyslexia-friendly one. Text size sets their\n"
+    "    size (3-15), and 'auto' takes it from the screen and the\n"
+    "    Windows display scale. Helper tips is the master switch for\n"
+    "    the hover tips. Performance mode suits a slower machine: the\n"
+    "    pane dividers become a thin guide line, and the panes resize\n"
+    "    once, when you let go. Tutorial starts the guided tour. About\n"
+    "    names the build, the license and the people behind it.\n"
     "\n"
     "PLOT > PLOT MODE\n"
-    "  Series variable: what the number in each file name means. Pick a\n"
-    "    preset (Pressure GPa / Temperature K / Dose Gy / Time min) or\n"
-    "    Custom\u2026 to type your own name and unit. The colorbar, legend,\n"
-    "    3D depth axis and readout table all follow. Only the labels\n"
-    "    change. Values, CSVs and file names stay as they are. The star\n"
-    "    beside the custom boxes saves that name and unit pair into the\n"
-    "    list. Next time it is one pick. Click the lit star to remove\n"
-    "    it.\n"
-    "  Auto rescan + every N s: the unattended top-up. One timer, every N\n"
-    "    seconds (5-3600, default 30). It waits for the first Run. It\n"
-    "    fires while the tool sits idle. It re-runs the folder when\n"
-    "    new files appeared. The switch is GLOBAL: one timer for the\n"
-    "    whole program.\n"
-    "    It is remembered between launches. While it is armed the\n"
-    "    status line under the plot reads 'auto-rescan: N s'. A tick\n"
-    "    that finds new files says so in a brief toast. Rescan and F5\n"
-    "    keep working by hand.\n"
+    "  Series variable: what the number in each file name means.\n"
+    "    Select a preset (Pressure GPa, Temperature K, Dose Gy, Time\n"
+    "    min) or Custom\u2026 and type a name and unit. The colorbar,\n"
+    "    legend, 3D depth axis and readout table follow; values, CSVs\n"
+    "    and file names do not change. The star saves a custom pair\n"
+    "    into the list, and a click on the lit star removes it.\n"
+    "  Auto rescan + every N s: one GLOBAL timer, every N seconds\n"
+    "    (5-3600, default 30), remembered between launches. It waits\n"
+    "    for the first Run, fires while SPARTA sits idle, and re-runs\n"
+    "    the folder when new files appeared. The status line reads\n"
+    "    'auto-rescan: N s' while it is armed. Rescan and F5 still\n"
+    "    work by hand.\n"
     "  Overlay all traces: every shown trace on one set of axes.\n"
-    "  Inspect one trace: one run. Sample/Background/Dark counts on the\n"
-    "    left axis and its Absorbance on the right. It shows the\n"
-    "    signal behind an absorbance curve. Channels S/B/D/Abs picks\n"
-    "    which curves it draws.\n"
-    "  Thickness (fringe n*t): one point per trace. The point is the\n"
-    "    optical thickness n*t, plotted against the Series variable.\n"
-    "    The defringe detector reads n*t out of the raw counts. Sample\n"
-    "    channel draws in filled circles, background in open squares,\n"
-    "    the D branch in the Decompression traces style. A small open\n"
-    "    triangle above the axis marks each trace where the detector\n"
-    "    missed. The Thickness row picks the channels (S / B), whether\n"
-    "    misses are marked and whether the points are joined.\n"
-    "    'Thickness table\u2026' lists n*t and its p-value per trace.\n"
-    "  Absorbance readout at\u2026 lists the absorbance at one wavelength for\n"
-    "    every shown trace. 'on click' does the same from a click on a\n"
-    "    2D plot.\n"
-    "  (What overlay mode plots is the Y axis row in AXES > AXIS.)\n"
+    "  Inspect one trace: one run, Sample/Background/Dark counts on\n"
+    "    the left axis and Absorbance on the right; Channels S/B/D/Abs\n"
+    "    picks the curves.\n"
+    "  Thickness (fringe n*t): one point per trace, n*t against the\n"
+    "    Series variable, read out of the raw counts by the defringe\n"
+    "    detector. Sample draws in filled circles, background in open\n"
+    "    squares, the D branch in the Decompression traces style, and\n"
+    "    an open triangle marks a detector miss. The Thickness row\n"
+    "    picks the channels (S / B), whether misses are marked and\n"
+    "    whether the points are joined. 'Thickness table\u2026' lists n*t\n"
+    "    and its p-value per trace.\n"
+    "  Absorbance readout at\u2026 lists the absorbance at one wavelength\n"
+    "    for every shown trace; 'on click' reads the same from a click\n"
+    "    on a 2D plot.\n"
+    "  What overlay mode plots is the Y axis row in AXES > AXIS.\n"
     "\n"
     "PLOT > STACKED & 3D\n"
-    "  Mode: off = shared baseline. 2D stacked = shift each trace up by\n"
-    "    Offset/step. 3D ridge: x=wavelength, depth=series value,\n"
-    "    height=absorbance. 3D shape: the same scene with the ridges\n"
-    "    joined into one continuous surface. Graphics in PLOT > 3D plot\n"
-    "    options sets how finely it is drawn. Keys 1 / 2 / 3 / 4.\n"
-    "    'Auto' beside the step picks a spacing that spreads the shown\n"
-    "    ridges evenly.\n"
+    "  Mode: off = shared baseline; 2D stacked shifts each trace up by\n"
+    "    Offset/step; 3D ridge draws x=wavelength, depth=series value,\n"
+    "    height=absorbance; 3D shape joins the ridges into one\n"
+    "    continuous surface, as finely as Graphics in PLOT > 3D PLOT\n"
+    "    OPTIONS says. Keys 1 / 2 / 3 / 4. 'Auto' beside the step\n"
+    "    spreads the shown ridges evenly.\n"
     "  'Auto separation (2D stacked)' sets the 2D stacked gap from the\n"
-    "    shown traces. The gap keeps every pair of curves apart. The\n"
-    "    tool prints the gap it used beside the box. Clear the box to\n"
-    "    use your own Offset/step.\n"
+    "    shown traces, keeps every pair of curves apart, and prints\n"
+    "    the gap it used beside the box. Clear the box for your own\n"
+    "    Offset/step.\n"
     "\n"
     "PLOT > 2D PLOT OPTIONS\n"
     "  Line style and Curve line width. Defringe compare draws the\n"
     "    selected trace's pre-defringe absorbance behind it in gray.\n"
-    "  Decompression traces: the D branch's own look. 'Style D traces\n"
-    "    apart' is the master switch. Untick it and a D trace looks\n"
-    "    like a C one. Line style takes the four patterns. It also\n"
-    "    takes 'custom', which reads the Pattern box, a dash sequence\n"
-    "    in points such as '6, 3'. It also takes 'bicolor'. Width\n"
-    "    blank = the Curve line width above. opacity is 0-1. Marker\n"
-    "    and size put a point marker on every D trace, so the branch\n"
-    "    survives grayscale. The tool thins the markers to about 24\n"
-    "    along a spectrum. A per-trace plot keeps one at every point.\n"
-    "    'bicolor' keeps the trace's own color and dashes a second\n"
-    "    color over it, half and half along the curve. It adds a\n"
-    "    Second color row. 'auto' takes the high-contrast ink for the\n"
-    "    plot page. You can also name a color or paste a hex code.\n"
-    "    The stripe length follows the line width.\n"
-    "    These controls apply to overlay, 2D stacked, the 3D ridge\n"
-    "    edges (pattern and width only) and the Thickness plot. The\n"
-    "    legend keys follow: they are the real lines, and a bicolor\n"
-    "    trace gets a hatched two-color swatch. On a FILLED 3D ridge,\n"
-    "    which shows only an edge, bicolor draws dashed.\n"
-    "  Inset zoom: magnify an X range in a corner panel, for an\n"
-    "    absorption-edge close-up. The tool outlines the region on the\n"
-    "    main plot.\n"
-    "  Aspect ratio: the shape of the plot box. Pick Auto (fill), 1:1,\n"
-    "    4:3, 3:2, 16:9, or a custom W:H.\n"
-    "  View: a pan pad (hold to repeat) with Fit in the middle. Fit X /\n"
-    "    Fit Y refit one axis. Zoom +/- work about the view center, on\n"
-    "    X, Y or both. Keyboard: arrows pan, the +/- keys zoom, 0 fits.\n"
-    "    The tool ignores those keys while you type in a box. Drag-box\n"
-    "    zoom and wheel-at-the-cursor still work.\n"
+    "  Decompression traces: the D branch's own look, under the master\n"
+    "    switch 'Style D traces apart'. Line style takes the four\n"
+    "    patterns, 'custom' (the Pattern box, a dash sequence in\n"
+    "    points such as '6, 3') and 'bicolor'. Width blank = the Curve\n"
+    "    line width above; opacity is 0-1. Marker and size put a point\n"
+    "    marker on every D trace, thinned to about 24 along a\n"
+    "    spectrum. 'bicolor' dashes a second color over the trace's\n"
+    "    own, half and half along the curve, at a stripe length the\n"
+    "    line width sets; its Second color row takes 'auto', a color\n"
+    "    name or a hex code, and on a filled 3D ridge it draws dashed.\n"
+    "    These controls reach overlay, 2D stacked, the 3D ridge edges\n"
+    "    (pattern and width only) and the Thickness plot. Legend keys\n"
+    "    are the real lines, and a bicolor trace gets a hatched\n"
+    "    two-color swatch.\n"
+    "  Inset zoom magnifies an X range in a corner panel, with the\n"
+    "    region outlined on the main plot.\n"
+    "  Aspect ratio is the shape of the plot box: Auto (fill), 1:1,\n"
+    "    4:3, 3:2, 16:9 or a custom W:H.\n"
+    "  View: a pan pad (hold to repeat) with Fit in the middle, Fit X\n"
+    "    and Fit Y for one axis, and Zoom +/- about the view center on\n"
+    "    X, Y or both. Arrows pan, +/- zoom and 0 fits, except while\n"
+    "    you type in a box. Drag-box zoom and wheel-at-the-cursor\n"
+    "    still work.\n"
     "\n"
     "PLOT > 3D PLOT OPTIONS\n"
-    "  Camera: Elevation / Azimuth / Zoom sliders, view presets (Iso,\n"
-    "    Front, Side, Top) and Reset. Arrow keys orbit 3 degrees a step,\n"
-    "    the +/- keys zoom, 0 resets, and the wheel drives the camera.\n"
-    "  Box & panes: Box frame picks which edges draw. The choices are\n"
-    "    open front, 3 axes (the classic look: the x / y / z tick axes\n"
-    "    facing you), closed, floor only, no top, none, and custom.\n"
-    "    'custom' unlocks the per-edge checkboxes, and '3 axes' can be\n"
-    "    forced on top of any mix. Frame shade and Frame width style\n"
-    "    the edges. Panes sets the back walls (grid / white / theme /\n"
-    "    light gray / off) with their own opacity.\n"
+    "  Camera: Elevation, Azimuth and Zoom sliders, the presets Iso,\n"
+    "    Front, Side and Top, and Reset. Arrows orbit 3 degrees a\n"
+    "    step, +/- zoom, 0 resets, the wheel drives the camera.\n"
+    "  Box & panes: Box frame draws open front, 3 axes (the x / y / z\n"
+    "    tick axes facing you), closed, floor only, no top, none or\n"
+    "    custom, and 'custom' unlocks the per-edge checkboxes. Frame\n"
+    "    shade and Frame width style the edges; Panes sets the back\n"
+    "    walls (grid / white / theme / light gray / off) and their\n"
+    "    opacity.\n"
     "  Ridges: 3D look (walls + traces / walls only / traces only /\n"
-    "    surface). Then color traces by colormap, fill opacity, and 3D\n"
-    "    line width / color / opacity. Then Project, which drops faint\n"
-    "    shadows on the back wall or the floor. Then log Z, clip Z\n"
-    "    spikes (99th pct), and even rank spacing.\n"
-    "  3D shape: the controls for the continuous sheet. They are\n"
-    "    Graphics, Smooth polygon edges, Draft quality while rotating\n"
-    "    and Interpolation with its [?] box. They are also Relief\n"
-    "    shading, Relief strength, Show mesh, Mark measured traces,\n"
-    "    Fill underside and Fill color.\n"
-    "  Graphics is one control for quality against speed. It has five\n"
-    "    notches: potato, low, medium, high and best. potato draws the\n"
-    "    fewest polygons and orbits the fastest. best draws every\n"
-    "    polygon in the grid. medium is the default. The dial moves the\n"
-    "    mesh and the stand-in an orbit draws together.\n"
-    "    Performance mode holds it at low, and the panel says so under\n"
-    "    the dial. The exported solid always uses the full grid.\n"
-    "  Smooth polygon edges antialiases each polygon of the sheet on its\n"
-    "    own. On softens every polygon outline and opens hairline seams\n"
-    "    between neighbours. Off draws the sheet solid.\n"
-    "  Draft quality while rotating draws a coarser sheet for the length\n"
-    "    of a drag. The draft follows the relief, mesh, underside and\n"
-    "    antialias settings. It is the same picture at a lower\n"
-    "    resolution.\n"
-    "  Relief strength runs 0 to 1 and scales the relief shading. 0.6 is\n"
-    "    the default, and it keeps the surface matched to its colorbar.\n"
-    "  Show mesh draws the edge of every polygon in the sheet. The line\n"
-    "    count follows the Graphics notch.\n"
-    "  Mark measured traces draws every measured trace on the surface\n"
-    "    at its own series value. The marked lines show which heights\n"
-    "    the tool measured. The 3D line color, width and opacity style\n"
-    "    them. 'auto' picks black or white per trace for the most\n"
-    "    contrast against the surface under it.\n"
-    "  Layout & speed: Stretch X/Y/Z fan the box out and the data keeps\n"
-    "    its spacing. Label gaps are per axis. 3D detail and its own\n"
-    "    performance mode are here too.\n"
+    "    surface), color traces by colormap, fill opacity, 3D line\n"
+    "    width / color / opacity, Project (shadows on the back wall or\n"
+    "    the floor), log Z, clip Z spikes (99th pct) and even rank\n"
+    "    spacing.\n"
+    "  3D shape, the continuous sheet: Relief shading, Relief strength\n"
+    "    (0 to 1, default 0.6), Interpolation with its [?] box, Show\n"
+    "    mesh (every polygon edge, at the Graphics notch), Mark\n"
+    "    measured traces (each measured trace at its own series value,\n"
+    "    styled by the 3D line color, width and opacity, with 'auto'\n"
+    "    picking black or white per trace), Fill underside and Fill\n"
+    "    color.\n"
+    "    Graphics runs potato, low, medium (the default), high and\n"
+    "    best, from the fewest polygons up to every polygon in the\n"
+    "    grid; Performance mode holds it at low. The exported solid\n"
+    "    always uses the full grid. Smooth polygon edges antialiases\n"
+    "    each polygon on its own, which opens hairline seams between\n"
+    "    neighbours; off draws the sheet solid. Draft quality while\n"
+    "    rotating draws a coarser sheet during a drag.\n"
+    "  Layout & speed: Stretch X/Y/Z fan the box out while the data\n"
+    "    keeps its spacing, Label gaps are per axis, and 3D detail and\n"
+    "    its own performance mode are here too.\n"
     "\n"
     "AXES > AXIS\n"
-    "  Four dropdowns, one per axis:\n"
-    "  X axis: Wavelength / Wavenumber / Photon energy. It is the same\n"
-    "    data, converted on the fly (wn = 1e7/nm, eV = 1239.84/nm).\n"
-    "  Y axis: absorbance, a raw counts channel, or 'formula: <name>'\n"
-    "    once you pick a formula (DATA > FORMULAS).\n"
-    "  Top axis: mirror a 2nd unit across the top.\n"
-    "  Right axis: mirror the left Y, or % transmittance.\n"
-    "  Flip X / Flip Y: reverse either axis.\n"
-    "  Label gap: X and Y distance (points) from axis to its label.\n"
+    "  One dropdown per axis. X axis: Wavelength / Wavenumber / Photon\n"
+    "    energy, the same data converted on the fly (wn = 1e7/nm,\n"
+    "    eV = 1239.84/nm). Y axis: absorbance, a raw counts channel,\n"
+    "    or 'formula: <name>' once a formula is picked (DATA >\n"
+    "    FORMULAS). Top axis mirrors a second unit across the top;\n"
+    "    Right axis mirrors the left Y, or % transmittance. Flip X /\n"
+    "    Flip Y reverse either axis. Label gap is the X and Y distance\n"
+    "    (points) from an axis to its label.\n"
     "\n"
     "AXES > LIMITS & SCALE\n"
-    "  X / Y / Z min and max; leave a pair blank to fit the data. A zoom\n"
-    "    on the plot (drag a box, scroll wheel, or the toolbar) fills\n"
-    "    the boxes, so the zoom holds. 'Reset axes' clears them and\n"
-    "    refits on every redraw. It is the way back after any zoom.\n"
-    "    Typing a limit and pressing Return does the same as Apply\n"
-    "    limits.\n"
-    "  Scale: linear or log, X and Y. (The Z row is 3D only.)\n"
+    "  X / Y / Z min and max; leave a pair blank to fit the data. A\n"
+    "    zoom on the plot (drag a box, the scroll wheel, or the\n"
+    "    toolbar) fills the boxes, so the zoom holds. 'Reset axes'\n"
+    "    clears them and refits on every redraw. Typing a limit and\n"
+    "    pressing Return does the same as 'Apply limits'.\n"
+    "  Scale: linear or log, X and Y. The Z row is 3D only.\n"
     "\n"
     "AXES > TICKS\n"
-    "  Major / minor tick spacing per axis in axis units; blank = auto,\n"
-    "    Z is 3D only. 'Auto' fills the boxes with the values in use, so\n"
-    "    you can nudge them. Return, or leaving a box, redraws.\n"
+    "  Major / minor tick spacing per axis in axis units; blank =\n"
+    "    auto, Z is 3D only. 'Auto' fills the boxes with the values in\n"
+    "    use. Return, or leaving a box, redraws.\n"
     "  Marks (out / in / inout), minor ticks, ticks on all sides, tick\n"
     "    length and width, and the tick-label font size.\n"
     "  X format / Y format: fixed decimals (0.00 = two places) or\n"
-    "    scientific. Rotate X helps with dense wavenumber ticks.\n"
+    "    scientific. Rotate X suits dense wavenumber ticks.\n"
     "\n"
     "AXES > FRAME & GRID\n"
-    "  Major grid / Minor grid: color, pattern, width and opacity, each\n"
-    "    styled on its own.\n"
-    "  Spines: Axis line (thickness in points), Axis color, and Hide\n"
-    "    top/right spines: the three controls that style the box around\n"
-    "    the plot, in one place.\n"
+    "  Major grid / Minor grid: color, pattern, width and opacity,\n"
+    "    each styled on its own.\n"
+    "  Spines: Axis line (thickness in points), Axis color and Hide\n"
+    "    top/right spines style the box around the plot.\n"
     "\n"
     "STYLE > COLORS & COLORMAP\n"
     "  Filter narrows the list. Colormap is the color scale across the\n"
-    "    traces, with a live swatch under it. Crameri maps (batlow, roma,\n"
-    "    hawaii, lajolla) are perceptually uniform and color-blind safe.\n"
-    "    [ and ] cycle. 'Set as default' remembers your pick, and the\n"
-    "    star shows when the current map already is it. Reverse flips\n"
-    "    low<->high color.\n"
-    "  Shades sets how the tool applies the map. 'continuous' gives\n"
-    "    each trace the exact color of its value. 'discrete' cuts the\n"
-    "    map into Levels steps and puts each trace on a step. 'auto'\n"
-    "    uses discrete for eight traces or fewer. Above eight traces\n"
-    "    'auto' uses continuous. Levels sets the number of steps, 2 to\n"
-    "    24. The colorbar shows the same steps.\n"
-    "  Trace colors\u2026 lists the shown traces. Click a swatch to set\n"
-    "    that trace's color by hand. A set color wins over the colormap\n"
-    "    in every 2D and 3D view. 'Clear all' returns every trace to\n"
-    "    the map.\n"
-    "  Lock colors to all datasets keeps a curve's color when you toggle\n"
-    "    others off. Tint plot with theme colors the plot page like the\n"
-    "    interface, and off is the neutral publication look. Text color\n"
-    "    sets the tick numbers and axis labels.\n"
+    "    traces, with a live swatch under it; the Crameri maps\n"
+    "    (batlow, roma, hawaii, lajolla) are perceptually uniform and\n"
+    "    color-blind safe. [ and ] cycle. 'Set as default' remembers\n"
+    "    the pick, and the star shows when the current map already is\n"
+    "    it. Reverse flips low<->high color.\n"
+    "  Shades: 'continuous' gives each trace the exact color of its\n"
+    "    value; 'discrete' cuts the map into Levels steps (2 to 24)\n"
+    "    and puts each trace on a step; 'auto' is discrete for eight\n"
+    "    traces or fewer, continuous above eight. The colorbar shows\n"
+    "    the same steps.\n"
+    "  Trace colors\u2026 lists the shown traces; click a swatch to set one\n"
+    "    by hand. A set color wins over the colormap in every 2D and\n"
+    "    3D view, and 'Clear all' returns every trace to the map.\n"
+    "  Lock colors to all datasets keeps a curve's color when others\n"
+    "    are toggled off. Tint plot with theme colors the plot page\n"
+    "    like the interface. Text color sets the tick numbers and axis\n"
+    "    labels.\n"
     "\n"
     "STYLE > FONTS\n"
     "  The typeface for every text element in the figure, and Bold /\n"
-    "    Italic per element (title, axis labels, ticks, legend, colorbar;\n"
-    "    2D and 3D). Italic needs a font that HAS an italic face. The\n"
-    "    default Jost draws upright, so pick Arial or Segoe UI\n"
-    "    (journal presets set Arial). Mathtext works in any label\n"
-    "    box:\n"
+    "    Italic per element (title, axis labels, ticks, legend,\n"
+    "    colorbar; 2D and 3D). Italic takes a font that HAS an italic\n"
+    "    face: the default Jost draws upright, so select Arial or\n"
+    "    Segoe UI, and the journal presets set Arial. Mathtext works\n"
+    "    in any label box:\n"
     "    $\\lambda$, Fe$^{2+}$...\n"
-    "  The per-item text sizes live next to each item.\n"
+    "  The per-item text sizes sit next to each item.\n"
     "\n"
     "STYLE > TITLE & AXIS LABELS\n"
-    "  Title and X / Y / Z label text, each with its own size box. Then\n"
-    "    Title pos and pad. Then Title X / Y in axes fractions: type\n"
-    "    both to pin a custom spot, and blank one to follow Title pos\n"
+    "  Title and X / Y / Z label text, each with its own size box,\n"
+    "    then Title pos and pad, then Title X / Y in axes fractions:\n"
+    "    type both to pin a custom spot, blank one to follow Title pos\n"
     "    again. X pos / Y pos slide the axis labels along their axes.\n"
-    "  Footnote stamps a small note at the page's bottom-left: sample\n"
-    "    notes, a run ID, 'preliminary'. It exports with the figure.\n"
+    "  Footnote stamps a small note at the page's bottom-left, such as\n"
+    "    a sample note or a run ID, and it exports with the figure.\n"
     "\n"
     "STYLE > LEGEND\n"
-    "  Show legend, Location ('outside right' keeps it off the data), up\n"
-    "    to 16 columns, font size, an optional title, and the key style\n"
-    "    (color box or line).\n"
+    "  Show legend, Location ('outside right' keeps it off the data),\n"
+    "    up to 16 columns, font size, an optional title, and the key\n"
+    "    style (color box or line).\n"
     "  Branch tags: the ' - C' / ' - D' suffix on the legend entries.\n"
     "    Switch it off, or rename the two branches in the small C / D\n"
-    "    boxes (heat / cool, inc / dec...). DISPLAY ONLY: the D list,\n"
-    "    the C/D-tagged CSVs and every file name keep C and D.\n"
-    "  X / Y always show the position actually drawn, in axes fractions.\n"
-    "    Type both numbers to pin a custom spot. Blank one, or change\n"
-    "    Location, to follow automatically again. 'Auto-fit oversized\n"
-    "    legend' reflows an oversized legend to fit the page. It adds\n"
-    "    columns first, then it lowers the font size. It writes the\n"
-    "    values it used back into the panel.\n"
-    "  Direct labels at curves: write each trace's value at its curve\n"
-    "    end, in place of a legend box. It works in 2D overlay, 2D\n"
-    "    stacked, and 3D ridge.\n"
-    "    Size sets the label text size. Color takes 'trace' for each\n"
-    "    label in its own curve's color, or one fixed color. Distance\n"
-    "    is the gap from the curve end, in points. Bold thickens the\n"
-    "    text. Backing draws a box behind each label, or a halo around\n"
-    "    it. Both keep the label readable over a crowded plot.\n"
-    "  Frame: border on/off, width, edge color, and separate background /\n"
-    "    border opacities. Shared with the colorbar.\n"
+    "    boxes. DISPLAY ONLY: the D list, the C/D tag in file name\n"
+    "    row and every file name keep C and D.\n"
+    "  X / Y show the position actually drawn, in axes fractions. Type\n"
+    "    both to pin a custom spot; blank one, or change Location, to\n"
+    "    follow automatically again. 'Auto-fit oversized legend'\n"
+    "    reflows an oversized legend to fit the page, adding columns\n"
+    "    first and then lowering the font size, and writes the values\n"
+    "    it used back into the panel.\n"
+    "  Direct labels at curves writes each trace's value at its curve\n"
+    "    end in place of a legend box, in 2D overlay, 2D stacked and\n"
+    "    3D ridge. Size sets the label text size; Color takes 'trace'\n"
+    "    or one fixed color; Distance is the gap from the curve end,\n"
+    "    in points; Bold thickens the text; Backing draws a box or a\n"
+    "    halo behind each label.\n"
+    "  Frame: border on/off, width, edge color, and separate\n"
+    "    background and border opacities. Shared with the colorbar.\n"
     "\n"
     "STYLE > COLORBAR\n"
     "  A continuous scale across the Series variable, labeled with it\n"
-    "    ('Pressure (GPa)' by default; the Bar label box overrides it).\n"
-    "    Location puts it right / left (vertical) or top / bottom (flat).\n"
-    "    X / Y pin it in figure fractions. Label font, tick font,\n"
-    "    thickness and tick count follow.\n"
-    "  The legend and the colorbar draw together. Tick both boxes and\n"
-    "    the tool moves the legend clear of the bar.\n"
-    "  'Auto: colorbar for many traces' is off by default. When it is\n"
-    "    on, a continuous colormap with more than ~10 traces uses a\n"
-    "    colorbar.\n"
-    "    A large legend would hide the data. A categorical colormap\n"
-    "    always keeps a discrete legend.\n"
-    "  The frame styling is shared with the legend and set there.\n"
+    "    ('Pressure (GPa)' by default; the Bar label box overrides\n"
+    "    it). Location puts it right / left (vertical) or top / bottom\n"
+    "    (flat). X / Y pin it in figure fractions. Label font, tick\n"
+    "    font, thickness and tick count follow.\n"
+    "  Tick both the legend and the colorbar and SPARTA moves the\n"
+    "    legend clear of the bar. The frame styling is shared with the\n"
+    "    legend and set there.\n"
+    "  'Auto: colorbar for many traces' is off by default. On, a\n"
+    "    continuous colormap with more than about 10 traces uses a\n"
+    "    colorbar; a categorical colormap always keeps a discrete\n"
+    "    legend.\n"
     "\n"
     "STYLE > REFERENCE LINES\n"
-    "  Vertical lines at given wavelengths (nm) and horizontal lines at\n"
-    "    given absorbances, comma-separated or space-separated. Use them\n"
-    "    for an edge or a baseline. Each set has its own color, pattern,\n"
-    "    width and opacity. 'Auto every N' + Fill lays down a regular\n"
-    "    comb, and Clear empties the box. 2D plots only.\n"
+    "  Vertical lines at given wavelengths (nm) and horizontal lines\n"
+    "    at given absorbances, comma-separated or space-separated.\n"
+    "    Each set has its own color, pattern, width and opacity. 'Auto\n"
+    "    every N' + Fill lays down a regular comb, and Clear empties\n"
+    "    the box. 2D plots only.\n"
     "\n"
     "DATA > SMOOTHING\n"
     "  Show smoothed draws the Igor 5-step smoothed curve over the raw\n"
-    "    one. Raw opacity (or 'No raw background') sets how much of the\n"
-    "    raw trace shows through. 'Smoothing settings' exposes the whole\n"
-    "    filter from the lab's Igor pipeline: cutoff, density, Hampel,\n"
-    "    split Savitzky-Golay, jump. The Savitzky-Golay windows are\n"
-    "    retuned for this spectrometer (101 / 51 points). Reset restores\n"
-    "    the defaults and clears the cache.\n"
+    "    one, and Raw opacity, or 'No raw background', sets how much\n"
+    "    of the raw trace shows through. 'Smoothing settings' exposes\n"
+    "    the whole filter from the lab's Igor pipeline: cutoff,\n"
+    "    density, Hampel, split Savitzky-Golay and jump. The\n"
+    "    Savitzky-Golay windows are retuned for this spectrometer\n"
+    "    (101 / 51 points). Reset restores the defaults and clears the\n"
+    "    cache.\n"
     "\n"
     "DATA > TRACES\n"
-    "  One row per loaded point. The check shows it. The D box marks it\n"
-    "    decompression (styled apart; see PLOT > 2D plot options).\n"
-    "    All / None, Only C / Only D, and\n"
-    "    'Decompression list...' reads a .csv/.txt of decompression\n"
-    "    values. The ? button spells out the format. 'Export D list\n"
-    "    (CSV) by selection' writes the ticked ones back out.\n"
-    "  'Save C/D-tagged CSVs\u2026' writes the CSVs a Run writes, one per\n"
-    "    loaded point. Every name carries the branch letter\n"
-    "    ({DAC}_{sample}_{value}_C_absorbance.csv / ..._D_...). C / D come\n"
-    "    from the state on screen: auto-detected branches plus the D boxes\n"
-    "    you ticked. One provenance sidecar covers the batch.\n"
+    "  One row per loaded point: the check shows it, the D box marks\n"
+    "    it decompression (styled apart; see PLOT > 2D PLOT OPTIONS).\n"
+    "    All / None and Only C / Only D set the whole list.\n"
+    "    'Decompression list\u2026' reads a .csv/.txt of decompression\n"
+    "    values, and the ? button spells out the format. 'Export D\n"
+    "    list (CSV) by selection' writes the ticked ones back out.\n"
+    "  The branch letter in the file names is the C/D tag in file\n"
+    "    name row in EXPORT > DATA FILES.\n"
     "\n"
     "DATA > FORMULAS\n"
-    "  Your own quantities, written as ordinary arithmetic over the loaded\n"
-    "    columns and shown as real typeset formulas. S / B / D are the raw\n"
-    "    sample, background and dark counts. wl is the wavelength and A is\n"
-    "    the pipeline absorbance. Sf / Bf / Af are the defringed channels\n"
-    "    and the absorbance recomputed from them, and they need defringe\n"
-    "    on. As is the smoothed absorbance, and it needs Show smoothed\n"
-    "    on. t is that trace's own fringe thickness n*t in um, and it is\n"
-    "    NaN wherever the detector missed. A formula that needs a\n"
-    "    missing column says so on the status line under the list.\n"
-    "  The dot beside a formula is the one control that matters. It plots\n"
-    "    that formula (the Y axis list gains 'formula: <name>', labelled\n"
-    "    with its name and unit). It is also what View / Edit, Delete and\n"
-    "    Save formula CSVs act on. Pick 'absorbance' in the Y axis list to\n"
-    "    go back; absorbance is always the default. The row on the plot\n"
-    "    right now is tinted. Its name is bold. It carries an 'on plot'\n"
-    "    tag.\n"
-    "  New / Edit opens the two-panel editor. The left side holds the\n"
-    "    name, unit, expression and an optional LaTeX override. The\n"
-    "    right side holds a Guide with worked examples. Leave the\n"
-    "    override on 'auto' and the tool derives the picture from the\n"
-    "    expression, so the two always agree. Click any symbol under\n"
-    "    the Expression box to insert it. The problems list updates as\n"
-    "    you type, with a live min/max/NaN preview of the first shown\n"
-    "    trace. Save stays off until the formula is clean.\n"
+    "  Your own quantities, written as ordinary arithmetic over the\n"
+    "    loaded columns and shown as typeset formulas. S / B / D are\n"
+    "    the raw sample, background and dark counts, wl the\n"
+    "    wavelength, A the pipeline absorbance; all four stay raw\n"
+    "    whatever the df box does. Sf / Bf / Af are the defringed\n"
+    "    channels and the absorbance recomputed from them, and they\n"
+    "    take defringe on. As is the smoothed absorbance and takes\n"
+    "    Show smoothed on. t is that trace's own fringe thickness n*t\n"
+    "    in um, NaN wherever the detector missed. A formula that calls\n"
+    "    a missing column says so on the status line under the list.\n"
+    "  The dot beside a formula picks it: it plots that formula, the Y\n"
+    "    axis list gains 'formula: <name>' with its name and unit, and\n"
+    "    View / Edit, Delete and Save formula CSVs act on it. Pick\n"
+    "    'absorbance' in the Y axis list to go back.\n"
+    "  New / Edit opens the two-panel editor: name, unit, expression\n"
+    "    and an optional LaTeX override on the left, a Guide with\n"
+    "    worked examples on the right. On 'auto' the override derives\n"
+    "    the picture from the expression. Click any symbol under the\n"
+    "    Expression box to insert it. The problems list updates as you\n"
+    "    type, with a live min/max/NaN preview of the first shown\n"
+    "    trace, and Save stays off until the formula is clean.\n"
     "    Absorbance, Transmittance, Absorption coefficient and A/t are\n"
-    "    built in and open read-only. Duplicate starts a new formula\n"
+    "    built in and open read-only; Duplicate starts a new formula\n"
     "    from one.\n"
-    "  SAFETY: a formula is arithmetic. The tool checks the text\n"
-    "    against a whitelist BEFORE anything runs. The whitelist holds\n"
-    "    the columns, the listed functions and the arithmetic\n"
-    "    operators. The tool rejects everything else at that check.\n"
-    "  Save formula CSVs... writes the picked formula for every loaded\n"
-    "    trace as SEPARATE two-column files ({trace}_{key}.csv:\n"
-    "    Wavelength_nm + the formula, with the expression in the header\n"
-    "    comments). The absorbance CSVs a Run writes stay untouched: a\n"
-    "    formula always gets its own files. One provenance sidecar covers\n"
-    "    the batch.\n"
+    "  SAFETY: SPARTA checks the text against a whitelist of the\n"
+    "    columns, the listed functions and the arithmetic operators\n"
+    "    BEFORE anything runs, and rejects everything else.\n"
+    "  'Save formula CSVs\u2026' writes the picked formula for every loaded\n"
+    "    trace as separate two-column files ({label}_{key}.csv:\n"
+    "    Wavelength_nm plus the formula, the expression in the header\n"
+    "    comments), under one provenance sidecar. The Formula values\n"
+    "    row in EXPORT > DATA FILES adds the same numbers as a column\n"
+    "    of each trace's own CSV instead.\n"
     "\n"
     "FRINGE > FFT REMOVAL\n"
-    "  The cleaning itself, one block per channel: a Low-pass cutoff in\n"
-    "    micron of n*t, Clear notches, and the notch list beside them.\n"
-    "    Click a peak on the chart to notch it. Click it again to let it\n"
-    "    back in.\n"
-    "  'Write to defringe' hands the centres and cutoffs you picked to\n"
-    "    the whole series. From then on the df box above the plot\n"
-    "    cleans at exactly those peaks. The defringed CSVs a Run writes\n"
-    "    and Export CSV\u2026 do the same. Until you press it, df notches\n"
-    "    the auto-detected fringe on its own, which is all most spectra\n"
-    "    need.\n"
-    "  The search gates sit in the Detection card, on the Fringe panel.\n"
-    "    They are the wavelength window, the n*t band, Fisher p, and\n"
-    "    the agreement tolerance. The switch that keeps the fringe\n"
-    "    report out of the log is there too.\n"
+    "  The cleaning itself, one block per channel: a Low-pass cutoff\n"
+    "    in micron of n*t, Clear notches, and the notch list beside\n"
+    "    them. Click a peak on the chart to notch it, and click it\n"
+    "    again to let it back in.\n"
+    "  The df box above the plot cleans each trace at that trace's own\n"
+    "    list: its centres, its per-centre half-widths, its low-pass\n"
+    "    and its edge. The Defringed data row in EXPORT > DATA FILES\n"
+    "    follows the same lists and adds the notch columns to each\n"
+    "    trace's CSV, from a Run and from an Export. A\n"
+    "    trace this panel has yet to see cleans at the fringe the\n"
+    "    detector finds.\n"
+    "  The search gates sit in the Detection card on the Fringe panel:\n"
+    "    the wavelength window, the n*t band, Fisher p and the\n"
+    "    agreement tolerance. The switch that keeps the fringe report\n"
+    "    out of the log is there too.\n"
     "\n"
     "EXPORT > PRESETS & PROJECTS\n"
-    "  A preset saves the whole control state under a name. Pick it and\n"
-    "    click Load. A project saves the same thing PLUS the input and\n"
-    "    output folders. It is a .json you can reopen exactly where you\n"
-    "    left off. Use 'Save project...' and 'Open project...'.\n"
+    "  A preset saves the whole control state under a name: pick it\n"
+    "    and click Load. A project saves the same thing plus the input\n"
+    "    and output folders, as a .json. 'Save project...' and 'Open\n"
+    "    project...' handle it.\n"
     "\n"
     "EXPORT > FIGURE\n"
-    "  Journal preset: sets column width AND house style in one pick. The\n"
-    "    presets marked 3D also style the 3D scene the way those journals\n"
-    "    print it: minimal 3-axes frame, panes and grid off, a\n"
-    "    colorbar in place of a legend, standard camera.\n"
+    "  Journal preset sets a publisher's column width and house style\n"
+    "    in one pick: typeface, text sizes, line weight, thin spines,\n"
+    "    ticks-in and DPI. The presets marked 3D also style the 3D\n"
+    "    scene: minimal 3-axes frame, panes and grid off, a colorbar\n"
+    "    in place of a legend, standard camera.\n"
     "    Nature 89/183 mm and Science 5.7/12.1/18.4 cm (sans-serif),\n"
-    "    RSI/AIP 3.37/6.69 in, APS 3.4/7.0 in (serif), Elsevier 90/190 mm.\n"
-    "    It also sets font, sizes, line weight, thin spines, ticks-in, and\n"
-    "    DPI. 'Clean style (no grid, thin spines)' is the font-agnostic\n"
-    "    tidy-up: it leaves your size and fonts alone. 'Set as default'\n"
-    "    remembers the preset and applies it at every launch. The star\n"
+    "    RSI/AIP 3.37/6.69 in, APS 3.4/7.0 in (serif), Elsevier\n"
+    "    90/190 mm.\n"
+    "    'Clean style (no grid, thin spines)' is the font-agnostic\n"
+    "    tidy-up: it leaves the sizes and fonts alone. 'Set as\n"
+    "    default' applies the preset at every launch, and the star\n"
     "    marks the one that is saved.\n"
-    "  W x H in / Apply: custom size.\n"
-    "  Transparent / Tight bbox / Pad / Face: export page options.\n"
-    "  (Typeface and the per-item text sizes are in STYLE > FONTS.)\n"
+    "  W x H in / Apply: custom size. Transparent / Tight bbox / Pad /\n"
+    "    Face: export page options. (Typeface and the per-item text\n"
+    "    sizes are in STYLE > FONTS.)\n"
     "\n"
     "EXPORT > EXPORT\n"
-    "  'Preview at export size (WYSIWYG)' renders the on-screen figure at\n"
-    "    the exact export dimensions. You then see the true printed\n"
-    "    proportions and text size before saving (off = fill the window).\n"
-    "  Save plot (PNG/PDF/SVG/EPS/TIFF; the format you saved last is\n"
-    "    offered first next time). 'Also save' writes every ticked extra\n"
+    "  'Preview at export size (WYSIWYG)' renders the on-screen figure\n"
+    "    at the exact export dimensions; off fills the window.\n"
+    "  DPI (72-600, default 300) is the raster resolution, and Copy\n"
+    "    figure puts the figure on the clipboard at the Figure size\n"
+    "    and that DPI (Ctrl+Shift+C).\n"
+    "  'Save plot...' writes PNG, PDF, SVG, EPS or TIFF, offering the\n"
+    "    format saved last first. 'Also save' adds every ticked extra\n"
     "    format in one go. 'Editable text' embeds TrueType text in the\n"
-    "    vectors (journal-safe, Illustrator-editable). 'Grayscale copy'\n"
-    "    adds a print-survival check PNG. 'Open after' opens the file when\n"
-    "    it is written. The Name template ({tab} {mode} {wf} {preset}\n"
-    "    {cmap} {date}) suggests the file name. PNG/PDF/SVG carry\n"
-    "    tool-version metadata.\n"
-    "  Copy figure puts the figure on the clipboard at the Figure size and\n"
-    "    the DPI beside it (Ctrl+Shift+C).\n"
-    "  Batch export solos each shown trace on the CURRENT styled figure\n"
-    "    and saves one file per trace (png/pdf/svg/tif).\n"
-    "  Export CSV\u2026 = smoothed (wl / cm^-1 / eV + raw + smoothed\n"
-    "    columns) or defringed CSVs. Crop limits them to an nm range.\n"
-    "  The branch-tagged CSVs are elsewhere: 'Save C/D-tagged CSVs\u2026'\n"
-    "    is in Data tab > Traces, under 'Export D list'.\n"
+    "    vectors, which journals accept and Illustrator can edit.\n"
+    "    'Grayscale copy' also writes <name>_grayscale.png, to check\n"
+    "    that the curves separate in print. 'Open after' opens the\n"
+    "    file once it is written. The Name template ({tab} {mode} {wf}\n"
+    "    {preset} {cmap} {date}) suggests the file name. PNG, PDF and\n"
+    "    SVG carry version metadata.\n"
+    "  'Batch export (one per shown trace)...' solos each shown trace\n"
+    "    on the current styled figure and saves one file per trace, in\n"
+    "    the format beside the button (png/pdf/svg/tif).\n"
+    "  The data columns are in EXPORT > DATA FILES.\n"
+    "\n"
+    "EXPORT > DATA FILES\n"
+    "  One list of the columns each trace's CSV carries, headed\n"
+    "    'Include in each trace's CSV:'. A Run writes them, and 'Export\n"
+    "    data\u2026' writes them again into any folder.\n"
+    "  Absorbance data (always) is ticked and disabled. A Run always\n"
+    "    writes the base columns Wavelength_nm, Wavenumber_cm-1,\n"
+    "    Absorbance, Dark, Background and Sample, one file per point,\n"
+    "    {DAC}_{sample}_{value}[_C|_D]_absorbance.csv.\n"
+    "  Defringed data, on by default, appends Absorbance_notch,\n"
+    "    Background_notch and Sample_notch: FFT-notch cleaning at each\n"
+    "    trace's own notch list from FRINGE > FFT REMOVAL, or at the\n"
+    "    global controls. A channel with no detected fringe leaves its\n"
+    "    two channel columns blank. The df switch changes the plot\n"
+    "    only.\n"
+    "  Smoothed data, off, appends Absorbance_smoothed, and\n"
+    "    Absorbance_notch_smoothed as well while Defringed data is\n"
+    "    ticked, at the current DATA > SMOOTHING settings.\n"
+    "  Formula values, off, appends one column with the active formula\n"
+    "    from DATA > FORMULAS. With no formula active the column is\n"
+    "    skipped and the log says so.\n"
+    "  C/D tag in file name, off, puts _C or _D in every file name,\n"
+    "    after the D toggles and the D list. Off, a name carries the\n"
+    "    letter only when the raw file name did. There is no second\n"
+    "    copy and no subfolder.\n"
+    "  'Export data\u2026' opens the Export dialog, and so do the left\n"
+    "    panel's 'Export\u2026' button and Ctrl+E.\n"
+    "  The dialog holds the same five ticks, bound to these, a Crop\n"
+    "    row with a low and a high edge in nm, and a Destination\n"
+    "    folder with Browse. Crop keeps only the rows inside that\n"
+    "    wavelength range, in every column. It applies to that export\n"
+    "    alone, never to a Run, and it is not remembered.\n"
+    "  Export writes one CSV per loaded trace into the destination,\n"
+    "    under one sidecar, _export.provenance.json. Open folder opens\n"
+    "    the destination and Close leaves. The dialog's status line\n"
+    "    and the one under the section button both read the last\n"
+    "    write; the per-trace lines go to the log.\n"
     "\n"
     "EXPORT > 3D PRINTING\n"
-    "  The 3D surface as a solid you can hold: the data becomes the top\n"
-    "    face, walls drop to a flat base, and 'Export STL...' writes a\n"
-    "    watertight binary STL any slicer accepts. Size X/Y and Height Z\n"
-    "    set the print in mm. Base is the slab it stands on. Z\n"
-    "    exaggeration lifts the relief when the structure you care about\n"
-    "    is small. It is live whenever three or more traces are shown.\n"
-    "    The tool proves the mesh closed before a byte is written, and a\n"
-    "    provenance sidecar records the whole recipe.\n"
+    "  The 3D surface as a solid: the data becomes the top face, walls\n"
+    "    drop to a flat base, and 'Export STL\u2026' writes a watertight\n"
+    "    binary STL any slicer accepts. SPARTA checks the mesh closed\n"
+    "    before it writes a byte, and a provenance sidecar records the\n"
+    "    recipe. The section is live whenever three or more traces are\n"
+    "    shown.\n"
     "  Shape picks what the export makes. 'Surface cube' builds the\n"
     "    solid above from three or more traces. 'Folder divider'\n"
-    "    builds a thin upright plate from one trace. The top edge of\n"
-    "    the plate is that trace. The plate stands on a wider foot.\n"
-    "  Plate (mm) sets the thickness of the divider plate. Foot (mm)\n"
-    "    sets the depth of the foot. Size X is the width of the plate.\n"
-    "    Height Z is its total height. Size Y and Base keep their\n"
-    "    meaning for the cube.\n"
-    "  The divider uses the trace you selected on the plot. 'One file\n"
-    "    per trace' writes one divider for every shown trace into a\n"
-    "    folder you pick. The divider passes the same closed-mesh proof\n"
-    "    as the cube."
+    "    builds a thin upright plate from one trace, its top edge that\n"
+    "    trace, standing on a wider foot.\n"
+    "  Size X/Y and Height Z set the print in mm, Base is the slab the\n"
+    "    cube stands on, and Z exaggeration lifts the relief. For the\n"
+    "    divider, Plate (mm) is the plate thickness, Foot (mm) the\n"
+    "    foot depth, Size X the plate width and Height Z its total\n"
+    "    height.\n"
+    "  The divider uses the trace selected on the plot. 'One file per\n"
+    "    trace' writes one divider for every shown trace into a folder\n"
+    "    you pick, and each passes the same closed-mesh check."
 )
 
 SHORTCUTS_TEXT = (
     "KEYBOARD SHORTCUTS\n"
     "\n"
+    "Ctrl+Enter     Run\n"
+    "Ctrl+E         Export data (opens the Export dialog)\n"
     "Ctrl+S         Save plot\n"
     "Ctrl+Z         Undo\n"
     "Ctrl+Y         Redo  (also Ctrl+Shift+Z)\n"
@@ -970,10 +1010,11 @@ SHORTCUTS_TEXT = (
     "[  /  ]        Previous / next colormap\n"
     "F1             This shortcuts list\n"
     "Esc            Close the dialog on top\n"
+    "Esc (running)  Cancel the run\n"
     "\n"
-    "The tool ignores single keys while you type in a box. Single keys\n"
-    "are the numbers, the brackets, the arrows, +/- and 0. Esc also\n"
-    "cancels a divider drag."
+    "SPARTA ignores single keys while you type in a box. The single\n"
+    "keys are the numbers, the brackets, the arrows, +/- and 0. Esc\n"
+    "also cancels a divider drag."
 )
 
 REF_VIEWS = {"Absorbance reference": INFO_TEXT,
@@ -988,6 +1029,12 @@ class Tooltip:
     flips the class-wide `enabled` flag to silence every tip at once."""
     enabled = True
     DELAY_MS = 450
+    # Tip colours, re-derived from the active theme by _apply_brand. They
+    # start as the shipped light-theme pair so a tip raised before the
+    # first _apply_brand still reads.
+    BG = "#ffffff"
+    FG = "#201b16"
+    EDGE = "#555555"
 
     def __init__(self, widget, text):
         self.widget = widget
@@ -997,6 +1044,11 @@ class Tooltip:
         widget.bind("<Enter>", self._schedule)
         widget.bind("<Leave>", self._hide)
         widget.bind("<ButtonPress>", self._hide, add="+")
+        # A tooltipped row can go away while the pointer rests on it: the
+        # formula list and the notch list both rebuild in place. Without
+        # this, the pending after-job fires on a dead widget, and a tip
+        # already on screen outlives the row it belongs to.
+        widget.bind("<Destroy>", self._hide, add="+")
 
     def _schedule(self, _=None):
         if not Tooltip.enabled or not self.text:
@@ -1020,9 +1072,9 @@ class Tooltip:
         y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
         self.tip = tk.Toplevel(self.widget)
         self.tip.wm_overrideredirect(True)
-        self.tip.configure(bg="#555555")    # 1px frame around the tip
+        self.tip.configure(bg=Tooltip.EDGE)  # 1px frame around the tip
         tk.Label(self.tip, text=self.text, justify="left", wraplength=300,
-                 background="#2b2b2b", foreground="#f0f0f0", relief="flat",
+                 background=Tooltip.BG, foreground=Tooltip.FG, relief="flat",
                  font="TkTooltipFont", padx=8, pady=5).pack(padx=1, pady=1)
         # clamp to the screen so tips near the right/bottom edge stay whole
         self.tip.update_idletasks()
@@ -1737,6 +1789,10 @@ class App:
         # Guarded by _ui_breathe; cleared as the last act of __init__.
         self._booting = True
         self.root = root
+        # First thing after the root: from here on, a Tk callback that dies
+        # says so instead of vanishing. Installed before a single widget
+        # exists, so the build itself is covered too.
+        self._install_error_handler()
         self.results = []
         self.trace_vars = {}      # label -> BooleanVar (show/hide)
         self.dvars = {}           # label -> BooleanVar (is decompression)
@@ -1809,10 +1865,15 @@ class App:
         self._qty_sel = tk.StringVar(value="")     # highlighted list row
         self._ydata_combos = []         # the three Y-data pickers
         self._qty_rows = []
+        self._qty_recs = []             # per-row widget handles, for retinting
+        self._qty_struct_sig = None     # what the rows SAY (rebuild trigger)
+        self._qty_look_sig = None       # what the rows LOOK like (retint)
+        self._qty_tint = None           # (theme, tint) the ttk style holds
         self._qty_cache = {}            # label -> (values, None) | (None, why)
         self._qty_cache_sig = None
         self._qty_skip_sig = None       # one log line per skip situation
         self._mathtext_cache = {}       # (tex, color, size) -> PhotoImage
+        self._surf_cache = {}           # 3D surface grids, keyed on their input
 
         # brand typography: private-load Jost and route the named fonts
         # through it so every ttk widget follows (DESIGN_RULES.md). Must
@@ -1938,7 +1999,20 @@ class App:
 
     def _bind_shortcuts(self):
         b = self.root.bind
+        # Run is the most repeated action at the beamline and was the one
+        # with no key. Escape reaches Cancel only while a worker is alive,
+        # and is bound with add="+" so every other Escape (dialogs, the
+        # settings menu, a divider drag) keeps its meaning.
+        b("<Control-Return>", self._hotkey_run)
+        try:                       # keypad Enter, where the keysym exists
+            b("<Control-KP_Enter>", self._hotkey_run)
+        except tk.TclError:
+            pass
+        b("<Escape>", self._hotkey_cancel_run, add="+")
         b("<Control-s>", lambda e: self._save_plot())
+        # Export data: the second half of the Run/export pair. The handler
+        # carries its own no-results note, so the key is safe at any time.
+        b("<Control-e>", lambda e: self._open_export_dialog())
         b("<Control-z>", lambda e: self._undo())
         b("<Control-y>", lambda e: self._redo())
         b("<Control-Z>", lambda e: self._redo())   # Ctrl+Shift+Z
@@ -1989,6 +2063,32 @@ class App:
             "Entry", "TEntry", "Combobox", "TCombobox",
             "Spinbox", "TSpinbox", "Text",
             "Scale", "TScale", "Listbox", "Treeview")
+
+    def _hotkey_run(self, _e=None):
+        """Ctrl+Enter: the Run button's action.
+
+        A multi-line box keeps the key: this binding sits on the toplevel,
+        which Tk reaches AFTER the widget's own class binding, so 'break'
+        here would arrive too late to take a newline back."""
+        w = self.root.focus_get()
+        if w is not None and w.__class__.__name__ == "Text":
+            return
+        try:
+            self._run()
+        except tk.TclError:
+            pass
+        return "break"
+
+    def _hotkey_cancel_run(self, _e=None):
+        """Escape while a run is under way: cancel it.
+
+        Returns None on purpose. 'break' here would swallow Escape for the
+        bindings that share the key."""
+        if self._run_busy():
+            try:
+                self._cancel_run()
+            except tk.TclError:
+                pass
 
     def _hotkey_wf(self, mode):
         if self._typing_in_box():
@@ -2344,6 +2444,17 @@ class App:
         wordmark dot (ac2), the 2px section rules (ink), and the primary
         brand buttons (ac1). Called at init end and from _toggle_dark."""
         br = self._brand()
+        # Tooltips are bare toplevels, so they take their colours from the
+        # palette here rather than from the ttk theme. The field ground and
+        # the body ink give a legible chip in every theme, High Contrast
+        # and Colorblind Safe included.
+        _tu, _tf, _tfld, _tpb, _tpf = self._theme_palette()
+        Tooltip.BG = _tfld
+        Tooltip.FG = _tf
+        try:
+            Tooltip.EDGE = self._blendc(_tfld, _tf, 0.35)
+        except (ValueError, TypeError):
+            Tooltip.EDGE = _tf
         if getattr(self, "_wm_dot", None) is not None:
             try:
                 self._wm_dot.configure(foreground=self._signal_fg())
@@ -2493,8 +2604,12 @@ class App:
         # so it is rebuilt (not just re-tinted) whenever the theme moves
         try:
             self._refresh_quantity_rows()
-        except Exception:
-            pass
+        except Exception as _qr_err:
+            # a broken formula list used to disappear here without a word
+            try:
+                self._logline("! formula list refresh failed: %r" % _qr_err)
+            except Exception:
+                pass
         for m in getattr(self, "_lf_markers", []):
             try:
                 _hn = getattr(m, "_hdr_icon", None)
@@ -3159,7 +3274,7 @@ class App:
              "Copy all (TSV)": "copy",
              "Load": "folder_open", "Open project…": "folder_open",
              "Open in Excel": "table",
-             "Export CSV…": "share", "Export settings": "share",
+             "Export data…": "share", "Export settings": "share",
              "Batch export (one per shown trace)…": "share",
              "Smoothing settings…": "gear",
              "Decompression list…": "folder",
@@ -3869,6 +3984,20 @@ class App:
         except Exception as e:
             _log_fail("chrome", e)
         try:
+            # The one permanently disabled row in the program that must
+            # still read: 'Absorbance data (always)' in EXPORT > DATA
+            # FILES states a fact rather than offering a choice. It takes
+            # the MUTED role (rule 65) instead of ttk's stock disabled
+            # grey, which disappears on the dark accent themes, and it is
+            # re-pinned here so it follows every theme switch. High
+            # Contrast collapses muted to the full fg by itself.
+            st.configure("Muted.TCheckbutton", background=uibg,
+                         foreground=fg)
+            st.map("Muted.TCheckbutton",
+                   foreground=[("disabled", self._muted_fg())])
+        except Exception as e:
+            _log_fail("muted check", e)
+        try:
             # the settings notebook: drop sv_ttk's boxed border so the
             # tabbed panel reads as flat like the hairline cards around it
             st.configure("TNotebook", background=uibg, borderwidth=0,
@@ -4168,7 +4297,15 @@ class App:
         """Keep NUKE a notch shorter than the top bar (visible gap to the
         brand strip) and never let it cover the Undo/Redo cluster on
         narrow windows: it stays centered while there is room, then slides
-        left of Undo, always leaving NUKE_AIR of clear air."""
+        left of Undo, always leaving NUKE_AIR of clear air.
+
+        R4: this runs from a <Configure> handler and PLACES a widget, which
+        posts another <Configure>. The loop settles today only because x
+        stops moving. Re-writing a placement the button already has is what
+        keeps the loop alive for a frame longer than it needs, so a pass
+        that computes no change stops before place_configure. The last
+        placement is remembered here rather than read back from
+        place_info(), which returns strings and would need parsing."""
         b = getattr(self, "nuke_btn", None)
         if b is None:
             return
@@ -4189,12 +4326,20 @@ class App:
                 # default ('inside') starts at the top bar's inner edge, so
                 # NUKE sat one PAD_X right of where it was aimed and gave
                 # that much of NUKE_AIR back to the Undo cluster.
+                want = ("centered", int(x), int(h))
+                if want == getattr(self, "_nuke_place", None):
+                    return
+                self._nuke_place = want
                 b.place_configure(relx=0, x=x, rely=0.5, anchor="center",
                                   height=h, bordermode="outside")
             else:
+                want = ("height-only", int(h))
+                if want == getattr(self, "_nuke_place", None):
+                    return
+                self._nuke_place = want
                 b.place_configure(height=h, bordermode="outside")
         except tk.TclError:
-            pass
+            self._nuke_place = None      # placement unknown after a failure
 
     def _apply_style_fonts(self, force=False):
         """sv_ttk pins fonts two ways at set_theme: named SunValley* fonts
@@ -5051,6 +5196,7 @@ class App:
             self.smooth_cache = s.get("smooth_cache", {})
             self.notch_cache = s.get("notch_cache", {})
             self._nt_cache = s.get("nt_cache", {})
+            self._surf_cache = {}      # per-session traces: start empty
             self.smooth_params = dict(s.get("smooth_params",
                                             smoothing.DEFAULTS))
             self.last_out_dir = s.get("last_out_dir")
@@ -5097,6 +5243,7 @@ class App:
             self.smooth_cache = {}
             self.notch_cache = {}
             self._nt_cache = {}
+            self._surf_cache = {}
             self.smooth_params = dict(smoothing.DEFAULTS)
             self.last_out_dir = None
             self._skipped_count = 0
@@ -5326,9 +5473,18 @@ class App:
         if isinstance(_so, dict):
             for _cat, _seq in list(_so.items()):
                 if isinstance(_seq, list):
-                    _so[_cat] = ["Stacked & 3D"
-                                 if _k == "Waterfall (2D / 3D plotting)"
-                                 else _k for _k in _seq]
+                    _seq = ["Stacked & 3D"
+                            if _k == "Waterfall (2D / 3D plotting)"
+                            else _k for _k in _seq]
+                    # v1.5.0: a saved order written before Data files
+                    # existed does not name it, and _reorder_sections packs
+                    # what a saved order does not know AFTER everything it
+                    # does -- which put the section below 3D Printing on
+                    # every build that had ever dragged a section. Give it
+                    # its factory slot, right after Export.
+                    if "Export" in _seq and "Data files" not in _seq:
+                        _seq.insert(_seq.index("Export") + 1, "Data files")
+                    _so[_cat] = _seq
         # v1.4.9 R9a: the two Dyslexic themes retire. The face they
         # carried is an App-font value, so a settings file that names
         # one keeps the face and takes the nearest live palette.
@@ -5398,6 +5554,20 @@ class App:
                         "Preset '%s' Graphics '%s' -> '%s'"
                         % (_pn, _pv, self.GFX_RENAMED[_pv]))
         self._migrate_defringe()
+        self._migrate_apply_centers()
+
+    def _migrate_apply_centers(self):
+        """Drop the retired 'Write to defringe' snapshot.
+
+        That button published ONE spectrum's notch centres and cutoffs into
+        settings['fr_apply_centers'], and every pressure was then cleaned at
+        the 20 GPa peaks. The fringe workbench holds per-trace state now and
+        answers for every pressure - its own notches where it has them, its
+        global controls elsewhere - so the snapshot has nothing left to say.
+        An older settings file carries the key; it is dropped on load and
+        nothing reads it.
+        """
+        self.settings.pop("fr_apply_centers", None)
 
     def _migrate_defringe(self):
         """Fold the retired Defringe section's values into the workbench.
@@ -5698,7 +5868,8 @@ class App:
                 except (tk.TclError, ValueError, IndexError):
                     mins.append(0)
             try:
-                sw = int(self.pw.cget("sashwidth"))
+                # str(): Tk 8.6.9 hands back a Tcl_Obj here
+                sw = int(str(self.pw.cget("sashwidth")))
             except (tk.TclError, ValueError):
                 sw = 6
             lo = sum(mins[:idx + 1]) + sw * idx
@@ -5825,7 +5996,8 @@ class App:
                 return
             _lmin, lw, _rmin, rw = self._pane_widths()
             try:
-                sw = int(self.pw.cget("sashwidth"))
+                # str(): Tk 8.6.9 hands back a Tcl_Obj here
+                sw = int(str(self.pw.cget("sashwidth")))
             except (tk.TclError, ValueError):
                 sw = 6
             if idx == 0 and panes[0] == str(self.left):
@@ -5989,14 +6161,24 @@ class App:
 
         brow = ttk.Frame(p); brow.pack(fill="x", pady=PAD_ROW)
         self.run_btn = self._brand_button(brow, "Run", self._run, big=True)
-        self.run_btn.pack(side="left", fill="x", expand=True)
-        Tooltip(self.run_btn, "Join the 4 grating segments per "
-                              "measurement. Compute absorbance. Write "
-                              "one CSV per measurement to an "
-                              "auto-named output subfolder.")
+        Tooltip(self.run_btn, "Join the grating segments per "
+                              "measurement, compute absorbance, and write "
+                              "one CSV per measurement to an auto-named "
+                              "output subfolder, with the columns ticked "
+                              "in Export > Data files.")
+        # Run keeps the row's stretch; its two neighbours are fixed-width,
+        # so they pack FIRST and Run packs LAST (rule 13: the last child
+        # packed is the first one clipped, and a button may not truncate).
+        # Taking their slabs off the right in this order leaves the row
+        # reading [Run ..............][Export...][Open output].
         self._openout_btn = ttk.Button(brow, text="Open output",
                                        command=self._open_output)
-        self._openout_btn.pack(side="left", padx=(PAD_X, 0))
+        self._openout_btn.pack(side="right", padx=(PAD_X, 0))
+        self._export_btn = ttk.Button(brow, text="Export\u2026",
+                                      command=self._open_export_dialog)
+        self._export_btn.pack(side="right", padx=(PAD_X, 0))
+        Tooltip(self._export_btn, EXPORT_DATA_TIP)
+        self.run_btn.pack(side="left", fill="x", expand=True)
 
 
         lrow = ttk.Frame(p); lrow.pack(fill="x", pady=PAD_ROW)
@@ -6056,9 +6238,12 @@ class App:
         hdr = ttk.Frame(gf); hdr.pack(fill="x", pady=PAD_ROW)
         self._lbl(hdr, text="View").pack(side="left")
         _views = list(self._ref_views().keys()) + ["My notes"]
-        _v0 = self.settings.get("ref_view", "Quick start")
+        # R20 2.4: My notes is what a FIRST launch opens on (the box is a
+        # scratchpad first and a manual second); the last pick is still
+        # remembered, so only a settings file with no ref_view sees this.
+        _v0 = self.settings.get("ref_view", "My notes")
         self.ref_kind = tk.StringVar(value=_v0 if _v0 in _views
-                                     else "Quick start")
+                                     else "My notes")
         cb = ttk.Combobox(hdr, textvariable=self.ref_kind, state="readonly",
                           values=_views)
         cb.pack(side="left", fill="x", expand=True, padx=(PAD_X, 0))
@@ -6189,6 +6374,13 @@ class App:
         that follows it drops with it. Sash positions survive pack_forget
         (verified), so nothing moves under the user that would not have
         moved anyway.
+
+        R15-F/P2: the freeze only pays off while NOTHING flushes between
+        it and the thaw. _log_action -> _logline -> _ui_breathe used to
+        call update_idletasks in the middle of the batch, which cashed the
+        whole invalidation in while the tree was still unmapped and then
+        left the remap to pay again. The counter set here is what
+        _ui_breathe reads to hold off; the thaw owns the one flush.
         """
         pw = getattr(self, "pw", None)
         if pw is None:
@@ -6197,14 +6389,17 @@ class App:
             if pw.winfo_manager() != "pack":
                 return False        # already frozen, or never packed
             pw.pack_forget()
-            return True
         except tk.TclError:
             return False
+        self._layout_frozen = getattr(self, "_layout_frozen", 0) + 1
+        return True
 
     def _thaw_layout(self, frozen):
-        """Remap the tree unmapped by _freeze_layout."""
+        """Remap the tree unmapped by _freeze_layout, and pay for the batch
+        once."""
         if not frozen:
             return
+        self._layout_frozen = max(0, getattr(self, "_layout_frozen", 1) - 1)
         pw = getattr(self, "pw", None)
         if pw is None:
             return
@@ -6212,6 +6407,13 @@ class App:
             pw.pack(side="top", fill="both", expand=True)
         except tk.TclError:
             return
+        try:
+            # THE flush of the batch: every font, style and tint write made
+            # between freeze and thaw is settled here, in one pass
+            if not self._layout_frozen:
+                self.root.update_idletasks()
+        except tk.TclError:
+            pass
         try:
             self.root.after_idle(self._place_sash_handles)
         except tk.TclError:
@@ -6371,17 +6573,57 @@ class App:
 
         delta shifts the whole box by that many points; mono_font
         overrides the verbatim face (the Guide panel's gear sets its own).
+
+        R20 fixed three things Nhan photographed. A wrapped list item lost
+        its hanging indent, because 'i' carried one flat 10 px margin
+        whatever depth the item sat at: the ladder i0..i12 hangs each
+        paragraph off its OWN depth instead. A table sat tight against the
+        prose under it, because 'm' carried no spacing3: it now breathes
+        like 'b'. And a paragraph break was a full blank body line stacked
+        on top of the spacing3 above it, an uneven double gap: 'gap' is
+        now a half-height spacer line of its own.
         """
+        body = self._F(delta)
+        try:
+            sp = max(3, body.measure(" "))
+        except tk.TclError:
+            sp = 4
         txt.tag_configure("h", font=self._F(delta + 1, "bold"), spacing1=11,
                           spacing3=3, foreground=self._signal_fg())
         txt.tag_configure("s", font=self._F(delta, "bold"), spacing1=8,
                           spacing3=2, foreground=self._head_fg())
-        txt.tag_configure("b", font=self._F(delta), spacing3=4)
-        txt.tag_configure("i", font=self._F(delta), spacing3=4,
-                          lmargin1=10, lmargin2=10)
+        txt.tag_configure("b", font=body, spacing3=4)
+        # The hanging-indent ladder, one rung per space of depth: lmargin1
+        # is where the item's first line starts, lmargin2 two spaces
+        # further in, so a wrapped line lands under the item's TEXT and
+        # not under its bullet. _guide_fill picks the rung from the
+        # paragraph's own leading spaces and clamps at 12, because a
+        # 28-space hang leaves no reading width in a 40-column box.
+        for d in range(0, 13):
+            txt.tag_configure("i%d" % d, font=body, spacing3=4,
+                              lmargin1=d * sp, lmargin2=(d + 2) * sp)
+        # plain 'i' is the aside a caller inserts with no leading spaces
+        # (the dialog Guide cards) and the rung _guide_fill gives it
+        txt.tag_configure("i", font=body, spacing3=4,
+                          lmargin1=2 * sp, lmargin2=4 * sp)
         txt.tag_configure("m", font=(mono_font if mono_font is not None
                                      else self._F(delta, mono=True)),
-                          foreground=self._code_fg())
+                          spacing3=4, foreground=self._code_fg())
+        # one spacer font per box: the Guide panel's gear moves ITS delta
+        # and nothing else's, so the gap cannot be shared across surfaces
+        gapf = getattr(txt, "_guide_gap_font", None)
+        if gapf is None:
+            gapf = tkfont.Font()
+            txt._guide_gap_font = gapf
+        try:
+            pt = int(body.cget("size"))
+        except (tk.TclError, TypeError, ValueError):
+            pt = max(7, getattr(self, "_body_size", 9) + delta)
+        try:
+            gapf.configure(family=body.cget("family"), size=max(2, pt // 2))
+        except tk.TclError:
+            pass
+        txt.tag_configure("gap", font=gapf)
         return txt
 
     def _guide_text_box(self, parent, width=40, delta=0):
@@ -6402,43 +6644,69 @@ class App:
         return txt
 
     def _guide_fill(self, txt, rows):
-        """Insert (tag, text) rows built for _guide_tags. 'gap' is a blank
-        line; anything else is the tag itself."""
+        """Insert (tag, text) rows built for _guide_tags.
+
+        'gap' is a half-height spacer line. An 'i' row hands its leading
+        spaces to the tag instead of the text: the spaces are stripped and
+        the rung of the ladder they measure (i0..i12) carries the indent,
+        which is what makes a wrapped line hang under the item's first one
+        rather than run back to the left margin. An 'i' row with no
+        leading spaces is the caller's plain aside and takes the two-space
+        rung, the depth the flat 10 px margin used to stand for.
+        """
         for _tag, _text in rows:
-            txt.insert("end", (_text or "") + "\n",
-                       () if _tag == "gap" else (_tag,))
+            s = _text or ""
+            tag = _tag
+            if _tag == "i":
+                depth = len(s) - len(s.lstrip(" "))
+                s = s.lstrip(" ")
+                tag = "i%d" % min(depth or 2, 12)
+            txt.insert("end", s + "\n", (tag,) if tag else ())
         return txt
 
     def _guide_fallback_segments(self, text):
-        """Minimal classifier for a view the loader hands over as one raw
-        block (compiled built-ins, or a loader without the segments
-        contract): blank-line paragraphs joined for reflow, ALL-CAPS
-        lines as headings, six-space indents and column-aligned rows
-        verbatim in mono - the same shapes guide_segments tags, so the
-        styling matches whichever path built it."""
-        segs, para = [], []
+        """Classify a view the loader hands over as one raw block: the
+        compiled built-ins (Absorbance reference, Panel guide), or a
+        loader without the segments contract.
+
+        This used to be a second, looser classifier, and the two drifted:
+        it froze every six-space line in mono, flattened every indent to
+        one column-0 paragraph, and ran a hanging list together into a
+        wall. Since R20 it is guide_tour's own classifier, so the built-in
+        views and the files on disk get the same headings, the same
+        verbatim blocks and the same hanging items - which is what lets
+        _guide_tags hang a wrapped line off the item's own depth wherever
+        the text came from.
+
+        The private loop stays only for a guide_tour too old to have
+        guide_segments: heading, verbatim, paragraph, nothing else.
+        """
+        segs = getattr(guide_tour, "guide_segments", None)
+        if segs is not None:
+            return segs(text or "")
+        out, para = [], []
 
         def flush():
             if para:
-                segs.append(("b", " ".join(s.strip() for s in para)))
+                out.append(("b", " ".join(para)))
                 del para[:]
         for ln in (text or "").splitlines():
             s = ln.rstrip()
             body = s.strip()
             if not body:
                 flush()
-                segs.append(("gap", ""))
+                out.append(("gap", ""))
             elif (len(s) - len(s.lstrip(" "))) >= 6 or "   " in body:
                 flush()
-                segs.append(("m", s))
+                out.append(("m", s))
             elif (body.upper() == body and any(c.isalpha() for c in body)
                   and len(body) >= 3):
                 flush()
-                segs.append(("h", body))
+                out.append(("h", body))
             else:
-                para.append(s)
+                para.append(body)
         flush()
-        return segs
+        return out
 
     def _ref_segments(self, kind):
         """(tag, text) rows for one Guide view: the loader's own
@@ -6484,9 +6752,10 @@ class App:
                 "Your notes live here and are saved between launches.\n"
                 "Sample list, gasket sizes, beamline phone numbers, todos\u2026"))
             return  # stays editable
-        for _tag, _text in self._ref_segments(kind):
-            self.ref.insert("end", _text + "\n",
-                            () if _tag == "gap" else (_tag,))
+        # through the shared filler, not a second copy of its loop: the
+        # hanging indents and the half-height gap of R20 3b are IN that
+        # helper, and the Guide panel is the surface they were drawn for
+        self._guide_fill(self.ref, self._ref_segments(kind))
         self.ref.config(state="disabled")
 
     def _save_user_notes(self):
@@ -6908,12 +7177,42 @@ class App:
         def _wrap(e, w=lab):
             want = max(80, int(e.width) - 2)
             try:
-                if int(w.cget("wraplength")) != want:
+                # str(): Tk 8.6.9 hands back a Tcl_Obj here
+                if int(str(w.cget("wraplength")) or 0) != want:
                     w.configure(wraplength=want)
             except (tk.TclError, ValueError):
                 pass
         lab.bind("<Configure>", _wrap)
         return lab
+
+    def _show_status(self, lbl, text="", foreground=None):
+        """Give a status label its text, and its ROW only while it has one.
+
+        A status line born packed holds a row of empty ground for the whole
+        session, which is what made the gap under EXPORT > DATA FILES and
+        EXPORT > 3D PRINTING wider than every other section gap (R20 2.5).
+        Every status label goes through here instead: text packs it at the
+        pack options it carries in `_status_pack`, empty text takes it back
+        out. `foreground` may be a role token (STATE, WARN) or a colour, and
+        is left alone when it is None. Safe on a label that was never built.
+        """
+        if lbl is None:
+            return
+        txt = "" if text is None else str(text)
+        try:
+            lbl.configure(text=txt)
+            if foreground is not None:
+                col = self._role_fg(foreground, None)
+                if col:
+                    lbl.configure(fg=col)
+            if txt:
+                if not lbl.winfo_manager():
+                    lbl.pack(**dict(getattr(lbl, "_status_pack", None)
+                                    or {"anchor": "w", "pady": PAD_TIGHT}))
+            else:
+                lbl.pack_forget()
+        except tk.TclError:
+            pass
 
     def _subhead(self, parent, title, sep=True):
         """The one sub-heading inside a section: a rule, then a bold line.
@@ -7064,7 +7363,7 @@ class App:
                      "Stack", "Session", "Pressure point", "FFT removal",
                      "Refractive Index from Intensity", "Panels",
                      "Presets & projects",
-                     "Figure", "Export", "3D Printing")
+                     "Figure", "Export", "Data files", "3D Printing")
 
     def _reorder_sections(self):
         """Order sections within each tab top-to-bottom; the tab is the
@@ -8386,7 +8685,9 @@ class App:
             wl = np.asarray(r["wl"]); wn = np.asarray(r["wn"])
             ab = np.asarray(r["absorbance"]); dk = np.asarray(r["dark_c"])
             bg = np.asarray(r["bg_c"]); sm = np.asarray(r["samp_c"])
-            with open(path, "w", newline="") as f:
+            # utf-8, not the machine default: a header or a label can carry
+            # um, Angstrom or Ohm, and cp1252 raises mid-write on those
+            with open(path, "w", newline="", encoding="utf-8") as f:
                 w = _csv.writer(f)
                 w.writerow(self._drawer_base_cols)
                 for i in range(len(wl)):
@@ -9439,7 +9740,8 @@ class App:
             ("Fringe", ["Stack", "Session", "Pressure point",
                         "FFT removal",
                         "Refractive Index from Intensity", "Panels"]),
-            ("Export", ["Presets & projects", "Figure", "Export"]),
+            ("Export", ["Presets & projects", "Figure", "Export",
+                        "Data files"]),
         ]
         for _label, _titles in _tabspec:
             self._tab_frames[_label] = self._make_scroll_page(self.rnotebook,
@@ -9672,7 +9974,7 @@ class App:
         Tooltip(ycb2, "What the left Y axis plots in overlay mode: computed "
                       "absorbance, a raw counts channel, or the active "
                       "custom quantity ('custom: ...', set in Formulas on "
-                      "the Data tab).")
+                      "the Data tab). " + DF_SYMBOL_NOTE)
         tr = ttk.Frame(ax); tr.pack(fill="x", pady=PAD_ROW)
         self._lbl(tr, text="Top axis", width=LBL_W).pack(side="left")
         self.topaxis = tk.StringVar(value="none")
@@ -10990,18 +11292,9 @@ class App:
                      "are the ticked D boxes, to a .csv or .txt. It "
                      "uses the format 'Decompression list...' reads "
                      "back.")
-        cdb = ttk.Button(tr, text="Save C/D-tagged CSVs\u2026",
-                         command=self._export_branch_csvs)
-        cdb.pack(fill="x", pady=PAD_ROW)
-        self._cd_export_btn = cdb
-        Tooltip(cdb, "Write the CSVs a Run writes: one per loaded "
-                     "point, same columns. Every file name carries the "
-                     "branch letter "
-                     "({DAC}_{sample}_{value}_C_absorbance.csv, or "
-                     "..._D_... for decompression). C and D come from "
-                     "the state on screen: the auto-detected branches "
-                     "plus any D boxes you ticked above. One "
-                     "provenance sidecar covers the batch.")
+        # The branch-tagged CSVs are a row in EXPORT > DATA FILES now
+        # (R19): one list of data files, one button, one sidecar. This
+        # section keeps the D list itself and its CSV.
 
         # --- Formulas (user-defined computed quantities) ---
         fq = self._group(r, "Formulas")
@@ -11134,32 +11427,85 @@ class App:
         ttk.Combobox(bf, textvariable=self.batch_fmt, state="readonly",
                      width=4, values=["png", "pdf", "svg", "tif"]
                      ).pack(side="left", padx=(PAD_X, 0))
-        cr2 = ttk.Frame(ex); cr2.pack(fill="x", pady=PAD_ROW)
-        self.crop_on = tk.BooleanVar()
-        ttk.Checkbutton(cr2, text="Crop", variable=self.crop_on).pack(side="left")
-        self.crop_min, self.crop_max = tk.StringVar(), tk.StringVar()
-        ttk.Entry(cr2, textvariable=self.crop_min, width=7).pack(
-            side="left", padx=(PAD_X, 0))
-        ttk.Entry(cr2, textvariable=self.crop_max, width=7).pack(
-            side="left", padx=(PAD_X, 0))
-        self._lbl(cr2, text="nm").pack(side="left", padx=(PAD_X, 0))
-        ecb = ttk.Button(ex, text="Export CSV\u2026")
-        ecb.pack(fill="x", pady=PAD_ROW)
-        Tooltip(ecb, "Write one CSV per trace into a chosen folder: smoothed "
-                     "(wl / cm^-1 / eV + raw + smoothed columns) or "
-                     "defringed ({stem}_absorbance_notch.csv, FFT-notch at "
-                     "the fringe workbench's settings). It runs at either "
-                     "display-toggle state.")
 
-        def _export_menu(_e=None):
-            m = tk.Menu(ecb, tearoff=0)
-            m.add_command(label="Smoothed CSV (raw + smoothed columns)\u2026",
-                          command=self._export_smoothed)
-            m.add_command(label="Defringed CSV (FFT-notch absorbance)\u2026",
-                          command=self._export_defringed)
-            m.tk_popup(ecb.winfo_rootx(),
-                       ecb.winfo_rooty() + ecb.winfo_height())
-        ecb.configure(command=_export_menu)
+        # --- Data files ---------------------------------------------------
+        # ONE list of what goes INTO each trace's CSV, and one button that
+        # writes those CSVs anywhere. Before R19 the same numbers came from
+        # six places behind five folder dialogs; R19 made that one ticked
+        # list, and R20 merged the files themselves, so a folder now holds
+        # one CSV per trace instead of three spellings of one measurement.
+        # The ticks are settings, not preset state (rule 30): a preset
+        # carries the figure, never the output.
+        df = self._group(r, "Data files")
+        _saved = self.settings.get("export_products")
+        if not isinstance(_saved, dict):
+            _saved = {}
+        self._lbl(df, text="Include in each trace's CSV:").pack(
+            anchor="w", pady=PAD_ROW)
+        # Absorbance is the reduction itself, so the row states the fact
+        # rather than offering a choice: ticked and disabled, in the MUTED
+        # role through Muted.TCheckbutton (pinned per theme in
+        # _pin_field_styles) so it reads on light, dark and High Contrast
+        # alike. The other four rows are ticks; the Export dialog binds to
+        # these same variables, so the two surfaces stay in step.
+        self._abs_always = tk.BooleanVar(value=True)
+        self.export_products = {}
+        self._product_checks = {}
+        for _k in EXPORT_ROW_ORDER:
+            if _k == "absorbance":
+                _c = ttk.Checkbutton(df, text=EXPORT_ROW_LABELS[_k],
+                                     variable=self._abs_always,
+                                     state="disabled",
+                                     style="Muted.TCheckbutton")
+            else:
+                _v = tk.BooleanVar(value=bool(_saved.get(
+                    _k, EXPORT_PRODUCT_DEFAULTS[_k])))
+                self.export_products[_k] = _v
+                _c = ttk.Checkbutton(df, text=EXPORT_ROW_LABELS[_k],
+                                     variable=_v)
+                _v.trace_add("write", lambda *a: self._persist_products())
+            _c.pack(anchor="w", pady=PAD_ROW)
+            Tooltip(_c, EXPORT_ROW_TIPS[_k])
+            self._product_checks[_k] = _c
+        # Crop is EXPORT-ONLY: it never touches a Run and it is not
+        # remembered, so its widgets live in the Export dialog (2.2) and
+        # only the variables are born here. They outlive the dialog, which
+        # is rebuilt on every open, and _crop_nm can be read headlessly.
+        self.crop_on = tk.BooleanVar()
+        self.crop_min, self.crop_max = tk.StringVar(), tk.StringVar()
+        _edb = ttk.Button(df, text="Export data…",
+                          command=self._open_export_dialog)
+        _edb.pack(fill="x", pady=PAD_ROW)
+        self._export_data_btn = _edb
+        Tooltip(_edb, EXPORT_DATA_TIP)
+        # The line carries the folder name at its end -- the part a reader
+        # is looking for -- so it fills its row and re-wraps at whatever
+        # width the row hands it, the way _fill_label does it (a FIXED
+        # wraplength would leave a dead column of empty ground, Nhan, R14
+        # A4). Its foreground still changes with the result, so it cannot
+        # simply BE a _fill_label.
+        #
+        # It is born UNPACKED (R20 2.5): an empty status line still cost a
+        # row of ground, which is what made the gap under Data files wider
+        # than every other section gap. _show_status packs it the moment it
+        # has something to say and takes it back out when it is cleared.
+        self._data_status = self._lbl(df, text="", foreground=STATE,
+                                      justify="left")
+        self._data_status._status_pack = {"fill": "x", "anchor": "w",
+                                          "pady": PAD_TIGHT}
+
+        def _wrap_status(e, w=self._data_status):
+            want = max(80, int(e.width) - 2)
+            try:
+                # str(): Tk 8.6.9 hands back a Tcl_Obj here
+                if int(str(w.cget("wraplength")) or 0) != want:
+                    w.configure(wraplength=want)
+            except (tk.TclError, ValueError):
+                pass
+        self._data_status.bind("<Configure>", _wrap_status)
+        Tooltip(self._data_status,
+                "The last write: how many traces, which columns and where "
+                "they went. The per-file lines are in the log.")
 
         # ---- 3D Printing: the plot as a printable solid ------------------
         # Registered under the Export tab by hand rather than through the
@@ -11262,9 +11608,8 @@ class App:
                             self._provenance(p_, k_, pr_, files=fl_),
                         **kw)
                 except Exception as e:
-                    self._stl_status.configure(
-                        text="export failed",
-                        foreground=self._semantic_fg(SEM_WARN))
+                    self._show_status(self._stl_status, "export failed",
+                                      WARN)
                     self._logline("  ! divider export failed: %r" % e)
                     messagebox.showerror(
                         "3D Printing",
@@ -11286,10 +11631,10 @@ class App:
                               % (m["euler"], m["euler_expected"],
                                  m["boundary_edges"],
                                  m["nonmanifold_edges"]))
-            self._stl_status.configure(
-                text=("%d divider%s, watertight, %d triangles"
-                      % (done, "" if done == 1 else "s", tri)),
-                foreground=self._state_fg())
+            self._show_status(
+                self._stl_status,
+                "%d divider%s, watertight, %d triangles"
+                % (done, "" if done == 1 else "s", tri), STATE)
 
         def _export_stl():
             """Write the shown series as a watertight binary STL.
@@ -11356,9 +11701,7 @@ class App:
                     provenance_writer=lambda p, k, pr, fl:
                         self._provenance(p, k, pr, files=fl))
             except Exception as e:
-                self._stl_status.configure(text="export failed",
-                                           foreground=self._semantic_fg(
-                                               SEM_WARN))
+                self._show_status(self._stl_status, "export failed", WARN)
                 self._logline("  ! STL export failed: %r" % e)
                 messagebox.showerror(
                     "3D Printing", "Writing the solid failed:\n"
@@ -11368,8 +11711,7 @@ class App:
             m = stats["mesh"]
             note = ("%d triangles, watertight, %.1f MB"
                     % (stats["triangles"], stats["bytes"] / 1048576.0))
-            self._stl_status.configure(text=note,
-                                       foreground=self._state_fg())
+            self._show_status(self._stl_status, note, STATE)
             self._logline("Exported printable solid -> " + path)
             self._logline("  . %d x %d grid from %d traces (%s); %s"
                           % (stats["grid_rows"], stats["grid_cols"],
@@ -11473,8 +11815,11 @@ class App:
         self._stl_btn = self._brand_button(sh, "Export STL\u2026",
                                            _export_stl)
         self._stl_btn.pack(fill="x", pady=PAD_ROW)
+        # born unpacked (R20 2.5): an empty status line still held a row
+        # of ground, and that row is what made this section's bottom gap
+        # wider than every other section gap on the page
         self._stl_status = self._lbl(sh, text="", foreground=STATE)
-        self._stl_status.pack(anchor="w", pady=PAD_TIGHT)
+        self._stl_status._status_pack = {"anchor": "w", "pady": PAD_TIGHT}
         Tooltip(self._stl_status,
                 "The last export: triangle count, the watertight result and "
                 "the file size. The full report goes to the log.")
@@ -11544,8 +11889,7 @@ class App:
     # app and does its whole job in one press - no dialog state to carry,
     # nothing destructive. Deliberately NOT offered: NUKE (it clears the
     # session; it keeps its own prominent home and does not belong one
-    # stray click from Run), "Export CSV..." (it posts a menu anchored to
-    # its own widget, which may be on a folded-away tab), "Batch export"
+    # stray click from Run), "Batch export"
     # (its format box would be left behind), and everything already
     # permanently on screen - Undo / Redo, the plot toolbar's Reset / Pan
     # / Zoom / Save, Collapse all and Reset all.
@@ -11820,7 +12164,7 @@ class App:
                 self._refresh_ydata_values()
                 Tooltip(ycb, "Left Y axis: absorbance, a raw counts "
                              "channel, or the active custom quantity "
-                             "(Formulas, Data tab).")
+                             "(Formulas, Data tab). " + DF_SYMBOL_NOTE)
             if "xaxis" in vis:
                 self._lbl(b3, text="X axis").pack(side="left",
                                                   padx=(PAD_X, 0))
@@ -13246,8 +13590,12 @@ class App:
         layout work (750 ms mid theme-switch) -- and the action log fires
         on every var change."""
         if getattr(self, "_theming", False) \
-                or getattr(self, "_booting", False):
-            return     # theme switch / first build: defer to the idle cycle
+                or getattr(self, "_booting", False) \
+                or getattr(self, "_layout_frozen", 0):
+            # theme switch / first build / a frozen relayout batch (text
+            # size, app font): defer to the idle cycle. A flush inside a
+            # freeze..thaw batch is the one thing that undoes the freeze.
+            return
         import time as _t
         now = _t.monotonic()
         if now - getattr(self, "_breathe_t", 0.0) >= min_gap:
@@ -13267,6 +13615,72 @@ class App:
         self.log.insert("end", msg + "\n", tag)
         self.log.see("end")
         self._ui_breathe()
+
+    # ---- Tk callback failures are never silent (R17) ----------------------
+    def _install_error_handler(self):
+        """Put every Tk callback traceback somewhere a user can find it.
+
+        Tkinter's default handler prints to stderr. The packaged build is a
+        windowed exe with no stderr, so a callback that raised took its
+        traceback with it: that is how R17 F1 hid for a whole release. The
+        defringe report raised on a None n*t, the redraw one line later
+        never ran, and all the user saw was a progress bar and a plot that
+        did not move. The traceback now goes to the error file first, then
+        stderr if there is one, then the log pane.
+        """
+        root = getattr(self, "root", None)
+        if root is None:
+            return
+
+        def handler(exc, val, tb):
+            # a failure INSIDE the handler must not re-enter it: _logline
+            # pumps idles, and an idle callback can raise
+            if getattr(self, "_in_error_handler", False):
+                return
+            self._in_error_handler = True
+            try:
+                self._report_callback_error(
+                    traceback.format_exception(exc, val, tb))
+            except Exception:
+                pass
+            finally:
+                self._in_error_handler = False
+
+        try:
+            root.report_callback_exception = handler
+        except Exception:
+            pass
+
+    def _report_callback_error(self, lines):
+        """One callback traceback, written three ways.
+
+        Each destination is guarded on its own: losing the log pane must not
+        cost the file, and a read-only program folder must not cost the log
+        pane. The file comes first because it is the one that survives the
+        window closing.
+        """
+        text = "".join(lines).rstrip()
+        path = getattr(self, "_error_log_path", None) or ERROR_LOG_PATH
+        try:
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write("---- %s ----\n%s\n"
+                         % (datetime.datetime.now().strftime(
+                             "%Y-%m-%d %H:%M:%S"), text))
+        except Exception:
+            pass
+        try:
+            if sys.stderr is not None:      # keep the console behaviour
+                sys.stderr.write(text + "\n")
+                sys.stderr.flush()
+        except Exception:
+            pass
+        try:
+            self._logline("! Callback error (also written to %s):"
+                          % os.path.basename(path))
+            for ln in text.splitlines():
+                self._logline("    " + ln)
+        except Exception:
+            pass
 
     def _dest_folder(self, in_dir, out_dir):
         base = os.path.basename(os.path.normpath(in_dir)) or "run"
@@ -14487,9 +14901,25 @@ class App:
         self._show_progbar(True)
         # Read every Tk value the worker needs HERE, on the main thread; Tk
         # variables are not safe to touch from the background thread.
-        notch_on = self._notch_on()
-        nkw = self._notch_params() if notch_on else None
-        nch = self._notch_channels() if notch_on else {}
+        notch_on = self._notch_on()          # the df DISPLAY switch
+        # What a Run writes is the ticked list in EXPORT > DATA FILES, not
+        # what the plot happens to be showing. Before R19 the defringed
+        # CSVs appeared only when the df switch was up at Run time, so the
+        # same folder reduced twice could hold different files.
+        want_notch = bool(self._products().get("defringed"))
+        # Each trace's own cleaning, read out HERE and matched to the
+        # worker's results by file stem: the recipes hold plain numbers and
+        # a frozen config, the tk variables behind them stay on this thread.
+        nrecipes = self._defringe_recipes() if want_notch else {}
+        nkw = self._notch_params() if want_notch else None
+        # A run REDUCES a folder, so most of its results are spectra nothing
+        # has a per-trace recipe for yet. They clean under the panel's global
+        # controls, and `_worker_recipe` builds that per record on the worker:
+        # `global_cfg` is pure, and a settings dict is not a tk variable.
+        nglobal = (fringe_panel.global_recipe(
+            self.settings, getattr(self, "_fringe", None), folder=in_dir)
+            if want_notch else None)
+        nsettings = dict(self.settings) if want_notch else {}
         profile = self._active_profile()          # naming profile (main thread)
         overrides = self._overrides_for(in_dir)
         vnm, vun = self._vname(), self._vunit()   # variable labels (main thread)
@@ -14518,18 +14948,29 @@ class App:
                         qlog("Viewer mode: loaded %d processed absorbance "
                              "CSV(s); nothing was recomputed or written."
                              % len(loaded))
-                if notch_on and results:
-                    nfx = 0
+                nfx = 0
+                # R20: the cleaning is COLUMNS in each trace's own CSV, so
+                # the worker computes them here (the expensive part, off
+                # the main thread) and hangs them on the record. Nothing is
+                # written from this thread; _finish_run rewrites the CSVs
+                # once the D list has been re-applied. Viewer mode reduces
+                # nothing, so it recomputes nothing.
+                if want_notch and results and wrote_reduction:
                     for r in results:
                         try:
-                            defringe.write_notch_csv(
-                                r, dest, bg_kw=nch.get("bg_c"),
-                                s_kw=nch.get("samp_c"), **nkw)
+                            rp = App._worker_recipe(nrecipes, nglobal,
+                                                    nsettings, in_dir, r)
+                            kw, bgk, sk = App._recipe_kwargs(rp)
+                            r["notch_cols"] = fringe_apply.notch_columns(
+                                r, bg_kw=bgk, s_kw=sk, **kw)
+                            r["notch_recipe"] = {
+                                "source": rp.get("source"),
+                                "channels": {k: dict(v) for k, v in
+                                             (rp.get("channels")
+                                              or {}).items()}}
                             nfx += 1
                         except Exception as e:
                             qlog("  NOTCH FAIL %s: %r" % (r["label"], e))
-                    qlog("Defringe on: wrote %d *_absorbance_notch.csv -> %s"
-                         % (nfx, dest))
                 # reduction provenance sidecar (thread-safe: locals + module
                 # globals only, no Tk reads)
                 if wrote_reduction:
@@ -14550,15 +14991,18 @@ class App:
                                               "(Background-Dark)]",
                                 "n_curves": len(results),
                                 "defringe_on": bool(notch_on),
-                                "defringe_params": (dict(nkw, channels=nch)
-                                                    if nkw else None),
+                                "defringed_columns": bool(want_notch),
+                                "defringe_params": (
+                                    dict(nkw, per_trace=App._recipe_provenance(
+                                        nrecipes)) if nkw else None),
                                 "curves": [{"label": r["label"],
                                             "pressure_GPa": r["pressure_val"]}
                                            for r in results]})
                     except Exception as e:
                         qlog("  ! provenance write failed: %r" % e)
                 q.put(("done", results, skipped, dest,
-                       self._run_cancel.is_set()))
+                       self._run_cancel.is_set(), bool(wrote_reduction),
+                       nfx))
             except Exception as e:
                 q.put(("error", e))
 
@@ -14607,8 +15051,14 @@ class App:
                 elif kind == "error":
                     self._finish_run_error(item[1]); return
                 elif kind == "done":
-                    _, results, skipped, dest, cancelled = item
-                    self._finish_run(results, skipped, dest, cancelled); return
+                    # unpacked defensively: an older 5-tuple still finishes
+                    # a run, it just writes no data files
+                    _, results, skipped, dest, cancelled = item[:5]
+                    self._finish_run(
+                        results, skipped, dest, cancelled,
+                        wrote_reduction=(item[5] if len(item) > 5 else None),
+                        n_defringed=(item[6] if len(item) > 6 else 0))
+                    return
         except queue.Empty:
             pass
         self._run_after = self.root.after(40, self._poll_run)
@@ -14642,7 +15092,18 @@ class App:
             return True
         return ext not in cls.NOTE_EXTS
 
-    def _finish_run(self, results, skipped, dest, cancelled=False):
+    def _finish_run(self, results, skipped, dest, cancelled=False,
+                    wrote_reduction=None, n_defringed=0):
+        """Land a finished Run in the panel.
+
+        wrote_reduction says whether the worker actually REDUCED the folder
+        (engine.run wrote CSVs) as opposed to re-reading a processed one in
+        viewer mode. It defaults to None, meaning 'not told': a caller that
+        only loads records into the panel writes nothing to disk. Only the
+        real Run path passes True. n_defringed is how many records the
+        worker managed to compute notch columns for; the columns themselves
+        travel on the records as r["notch_cols"], and _write_run_csvs picks
+        them up rather than cleaning a second time."""
         self._run_queue = None
         self._show_progbar(False)
         if not results:
@@ -14669,6 +15130,7 @@ class App:
         self.smooth_cache.clear()
         self.notch_cache.clear()
         self._nt_cache.clear()
+        self._surf_cache.clear()          # a new load, a new 3D sheet
         self._hide_raw_banner()
         raw_only = [r for r in results
                     if not np.isfinite(r["absorbance"]).any()]
@@ -14703,6 +15165,16 @@ class App:
         disp = self._refresh_inspect_values()
         if disp:
             self.inspect_p.set(disp[0])
+        # The ticked columns, added to the CSVs engine.run just wrote. It
+        # runs HERE because _build_trace_checks has re-applied the stored D
+        # list, so the C/D letters are final, and before the redraw so the
+        # log reads in the order the work happened.
+        if wrote_reduction and results and not cancelled:
+            self._write_run_csvs(results, dest)
+        elif wrote_reduction and cancelled:
+            self._logline("Run cancelled: no data files were written.")
+        elif wrote_reduction is False and results:
+            self._logline("Viewer mode: nothing written.")
         # A folder's notes are not a failed read. The bundled demo ships
         # a README.txt, so the first Run a new user ever pressed opened
         # with SPARTA warning that SPARTA could not read a SPARTA file
@@ -14751,12 +15223,28 @@ class App:
             pass
 
     def _build_trace_checks(self):
+        """Rebuild the Traces list from self.results.
+
+        Q1: which traces are ticked, and which one is selected, SURVIVE the
+        rebuild. A rescan re-runs this with the same traces plus whatever
+        landed since, and re-ticking everything threw away the curation the
+        user had already done on a series still being collected (six of
+        thirty picked, then all thirty back). The label is the identity, so
+        a trace keeps its state wherever it lands in the new order, and a
+        label seen for the first time starts shown."""
+        was_shown = {}
+        for lbl, v in (getattr(self, "trace_vars", None) or {}).items():
+            try:
+                was_shown[lbl] = bool(v.get())
+            except (tk.TclError, AttributeError, ValueError):
+                pass
         for w in self.trace_frame.winfo_children():
             w.destroy()
         self.trace_vars, self.dvars = {}, {}
         for r in self.results:
             row = ttk.Frame(self.trace_frame); row.pack(fill="x")
-            show = tk.BooleanVar(value=True); self.trace_vars[r["label"]] = show
+            show = tk.BooleanVar(value=was_shown.get(r["label"], True))
+            self.trace_vars[r["label"]] = show
             # D defaults: explicit tag wins, else the known-experiment list
             tag = r.get("branch_tag")
             d_default = (tag == "D") or (tag is None and r["pressure_str"]
@@ -14785,6 +15273,11 @@ class App:
         # c keys: the D vars have just been rebuilt, so this is the
         # one place a remembered decompression list can be put back.
         self._apply_stored_dlist()
+        # the highlighted curve is a label too: it survives as long as its
+        # trace is still loaded, and goes with it when it is not
+        if getattr(self, "_sel_trace", None) is not None \
+                and self._sel_trace not in self.trace_vars:
+            self._sel_trace = None
 
     def _set_all(self, state):
         for v in self.trace_vars.values():
@@ -15376,27 +15869,50 @@ class App:
         return [r for r in self.results if self.trace_vars.get(r["label"])
                 and self.trace_vars[r["label"]].get()]
 
-    def _trace_color(self, r, cmap_name, shown):
+    def _color_basis(self, shown):
+        """Everything _trace_color derives a colour FROM, worked out once.
+
+        P9: _trace_color used to rebuild the label list and scan it for the
+        trace it was colouring, inside loops that call it once per trace --
+        quadratic in the number of curves, and a 3D draw walks those loops
+        four times. The rank map and the series range depend on the draw,
+        never on the trace, so they are built here and handed down.
+
+        'main' is the locked basis (every loaded trace) or the shown subset;
+        'alt' is the shown subset kept as the fallback for a trace that is
+        not in the locked basis, which is exactly what the old code did by
+        re-deriving from `shown`."""
+        lock = (getattr(self, "lock_colors", None) is not None
+                and self.lock_colors.get())
+        base = self.results if (lock and self.results) else shown
+
+        def _pack(recs):
+            pv = [x["pressure_val"] for x in recs]
+            return ({x["label"]: i for i, x in enumerate(recs)}, len(recs),
+                    (min(pv), max(pv)) if pv else (0.0, 1.0))
+        main = _pack(base)
+        return (main, _pack(shown) if base is not shown else main)
+
+    def _trace_color(self, r, cmap_name, shown, basis=None):
         """Per-trace color. With 'Lock colors to all datasets' on, the color
         basis is the full loaded set (self.results) keyed by label, so a curve
         keeps its color as others are toggled. Off reproduces the legacy
-        shown-subset assignment exactly."""
+        shown-subset assignment exactly.
+
+        `basis` is a _color_basis() result: pass it from a loop, and the
+        per-trace scan of the label list goes away (P9)."""
         # R9b item 3: a colour the user set by hand for THIS trace wins
         # outright -- before the lock, before the map, before reverse.
         _ov = self._color_override(r["label"])
         if _ov is not None:
             return _ov
-        lock = getattr(self, "lock_colors", None) is not None and self.lock_colors.get()
-        base = self.results if (lock and self.results) else shown
-        labels = [x["label"] for x in base]
-        if r["label"] not in labels:
-            base = shown
-            labels = [x["label"] for x in base]
-        pv = [x["pressure_val"] for x in base]
-        pmin, pmax = (min(pv), max(pv)) if pv else (0.0, 1.0)
+        if basis is None:
+            basis = self._color_basis(shown)
+        rank, n, (pmin, pmax) = basis[0]
+        if r["label"] not in rank:
+            rank, n, (pmin, pmax) = basis[1]
         rev = self.cmap_rev.get()
-        n = len(base)
-        idx = labels.index(r["label"]) if r["label"] in labels else 0
+        idx = rank.get(r["label"], 0)
         cr = (n - 1 - idx) if rev else idx
         cmin, cmax = (pmax, pmin) if rev else (pmin, pmax)
         # R9b item 3: the discrete Shades mode puts the trace on one of N
@@ -15427,65 +15943,211 @@ class App:
         """
         self.show_notch = tk.BooleanVar(value=False)
         self._df_redraw_job = None      # coalesced workbench-driven redraw
+        # the defringe pass (P8): worker queue, its follow-ups and its counts
+        self._df_queue = None
+        self._df_after = None
+        self._df_then = None
+        self._df_on_cancel = None
+        self._df_done = 0
+        self._df_total = 0
+        self._df_prev_state = ("Ready", "#2a8a4a")
 
     def _defringe_state(self):
         """The workbench's FFT-removal state, UI or no UI.
 
         Live tk variables when the Fringe tab has been built; the fr_
         settings keys - which carry the same defaults - when it never
-        has. Everything defringe in this program reads THIS, so there is
-        no second set of controls that could disagree with it.
+        has. These four are series-wide: the gates and the default
+        half-width. What each trace is cleaned AT comes from that trace's
+        own workbench recipe (_defringe_recipe), so there is still no
+        second set of controls that could disagree with the panel.
         """
         return fringe_panel.defringe_state(self.settings,
                                            getattr(self, "_fringe", None))
 
     def _notch_params(self):
-        """Detection gates + notch half-width, as defringe_channel kwargs."""
+        """Detection gates + notch half-width, as clean_channel kwargs."""
         st = self._defringe_state()
         return {"halfwidth_um": st["halfwidth_um"],
                 "nt_min_nm": st["nt_min_um"] * 1000.0,
                 "nt_max_nm": st["nt_max_um"] * 1000.0,
                 "pvalue_max": st["pvalue_max"]}
 
-    def _notch_channels(self):
-        """Per-channel overrides the workbench PUBLISHED: the notch centres
-        picked on the chart and that channel's low-pass cutoff.
+    @staticmethod
+    def _trace_stem(r):
+        """The file stem the workbench files a trace's state under.
 
-        Empty until 'Write to defringe' has been pressed - and empty means
-        the auto-detected fundamental on its own, which is what df does
-        for someone who never opens the Fringe tab. Centres and cutoffs
-        are per-channel and per-spectrum, which is why they travel as a
-        published snapshot while the gates and the default half-width are
-        read live.
+        The same string fringe_panel._stem_of builds, worked out from the
+        record alone: a Run's worker matches its results to the recipes the
+        main thread read out, and it may not touch a tk variable to do it.
         """
-        return self._defringe_state()["channels"]
+        if r.get("stem"):
+            return str(r["stem"])
+        return ("%s_%s_%s" % (r.get("dac", ""), r.get("sample", ""),
+                              r.get("pressure_str", ""))).lower()
 
-    def _notch_kw(self, which):
-        """Full defringe kwargs for one raw channel ('samp_c' / 'bg_c')."""
-        kw = self._notch_params()
-        kw.update(self._notch_channels().get(which) or {})
+    def _global_recipe(self, r=None):
+        """The panel's GLOBAL cleaning, for a record the workbench has no
+        per-trace answer for and for a session with no workbench at all.
+
+        The gates, the half-width and the per-channel low-pass, with the core
+        detecting that spectrum's own fundamental. Read from the live panel
+        when it exists and from the fr_ settings keys when it does not; the
+        two agree by construction.
+        """
+        folder = None
+        try:
+            folder = (self.in_var.get() or "").strip() or None
+        except (AttributeError, tk.TclError):
+            folder = None
+        return fringe_panel.global_recipe(
+            self.settings, getattr(self, "_fringe", None),
+            key=(self._trace_stem(r) if r is not None else None),
+            rec=r, folder=folder)
+
+    @staticmethod
+    def _worker_recipe(recipes, glob, settings, folder, r):
+        """One record's recipe, off the main thread.
+
+        The Run worker reduces spectra the main thread has never held, so a
+        stem missing from the map is the normal case rather than a failure.
+        It cleans under the global controls, at a config built for ITS OWN
+        pressure and acquisition date - `fringe_panel.global_cfg` is pure, and
+        the settings dict it reads is a copy taken before the worker started.
+        """
+        rp = recipes.get(App._trace_stem(r))
+        if rp is not None:
+            return rp
+        rp = dict(glob or {})
+        rp["cfg"] = fringe_panel.global_cfg(settings, r, folder)
+        rp.setdefault("channels", {})
+        rp["source"] = "global"
+        return rp
+
+    def _defringe_recipe(self, r):
+        """The cleaning for ONE record. Never None.
+
+        The workbench answers for every loaded trace: live state for the one
+        on screen, its committed copy for a trace it has filed, the global
+        controls for the rest. A session with no workbench object at all gets
+        the same global recipe off the settings keys, so there is one pipeline
+        and no second path a pressure can fall through to.
+
+        Guarded: this reads tk variables through the panel, and a defringe
+        pass is not the place for a workbench slip to stop a plot.
+        """
+        fn = getattr(getattr(self, "_fringe", None), "defringe_recipe", None)
+        if callable(fn):
+            try:
+                rp = fn(r)
+            except Exception:
+                rp = None
+            if rp:
+                return rp
+        return self._global_recipe(r)
+
+    def _defringe_recipes(self):
+        """{stem: recipe} for every loaded trace.
+
+        The workbench builds the map; this completes it, so a record the
+        panel could not answer for still carries the global controls rather
+        than dropping out of a batch write.
+        """
+        fn = getattr(getattr(self, "_fringe", None), "defringe_recipes", None)
+        out = {}
+        if callable(fn):
+            try:
+                out = dict(fn() or {})
+            except Exception:
+                out = {}
+        for r in (self.results or []):
+            stem = self._trace_stem(r)
+            if stem not in out:
+                out[stem] = self._defringe_recipe(r)
+        return out
+
+    @staticmethod
+    def _recipe_provenance(recipes):
+        """{stem: what was applied}, in plain JSON types.
+
+        A recipe carries a FringeConfig, which a provenance sidecar cannot
+        hold; the two numbers off it that describe the cleaning - the
+        wavelength window the detector ran in - travel as numbers.
+        """
+        out = {}
+        for stem, rp in (recipes or {}).items():
+            cfg = rp.get("cfg")
+            row = {"channels": {k: dict(v) for k, v
+                                in (rp.get("channels") or {}).items()},
+                   "source": rp.get("source")}
+            if cfg is not None:
+                row["wl_window_nm"] = [float(cfg.fit_wl_min_nm),
+                                       float(cfg.fit_wl_max_nm)]
+            out[str(stem)] = row
+        return out
+
+    @staticmethod
+    def _recipe_kwargs(recipe):
+        """(shared kwargs, bg overrides, samp overrides) out of one recipe.
+
+        Pure dict work over plain numbers and a frozen config, so the Run
+        worker calls it off the main thread.
+        """
+        kw = dict(recipe.get("gates") or {})
+        if recipe.get("cfg") is not None:
+            kw["cfg"] = recipe["cfg"]
+        ch = recipe.get("channels") or {}
+        return kw, ch.get("bg_c"), ch.get("samp_c")
+
+    def _notch_kw(self, which, r=None, recipe=None):
+        """Full `fringe_apply.clean_channel` kwargs for one raw channel
+        ('samp_c' / 'bg_c'), out of that trace's recipe."""
+        if recipe is None:
+            recipe = self._defringe_recipe(r)
+        kw, bg, samp = self._recipe_kwargs(recipe)
+        kw = dict(kw)
+        kw.update((bg if which == "bg_c" else samp) or {})
         return kw
+
+    @staticmethod
+    def _notch_pack(r, sc, bc):
+        """One trace's defringed channels plus the absorbance they make."""
+        s, b, d = sc["clean"], bc["clean"], r["dark_c"]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            A = -np.log10((s - d) / (b - d))       # == engine.process_group
+        A[~np.isfinite(A)] = np.nan
+        return {"absorbance": A, "sample": s, "background": b,
+                "s_applied": sc["applied"], "s_pvalue": sc["pvalue"],
+                "s_nt": sc["nt_um"], "b_applied": bc["applied"],
+                "b_pvalue": bc["pvalue"], "b_nt": bc["nt_um"],
+                "s_centers": sc.get("centers_nm"),
+                "b_centers": bc.get("centers_nm")}
 
     def _notch_result(self, r):
         """FFT-notch the raw Sample and Background counts independently, then
-        recompute absorbance from the defringed channels. Cached per trace;
-        cleared when the switch flips, when the workbench moves a parameter
-        (_notch_params_changed) and when new data loads."""
+        recompute absorbance from the defringed channels.
+
+        Each trace is cleaned at ITS OWN workbench state - the centres, the
+        per-centre half-widths and the low-pass that trace was left with -
+        and under the panel's global controls, at its own detected
+        fundamental, for a trace the workbench holds nothing for. One
+        pipeline: `fringe_apply.clean_channel` makes the same
+        `compute_channel_fit` call the workbench draws from.
+
+        Cached per trace; the entry goes when the switch flips, when the
+        workbench moves that trace's cleaning (_notch_params_changed) and
+        when new data loads.
+        """
         key = r["label"]
         if key not in self.notch_cache:
-            sc = defringe.defringe_channel(r["wl"], r["samp_c"],
-                                           **self._notch_kw("samp_c"))
-            bc = defringe.defringe_channel(r["wl"], r["bg_c"],
-                                           **self._notch_kw("bg_c"))
-            s, b, d = sc["clean"], bc["clean"], r["dark_c"]
-            with np.errstate(divide="ignore", invalid="ignore"):
-                A = -np.log10((s - d) / (b - d))   # == engine.process_group
-            A[~np.isfinite(A)] = np.nan
-            self.notch_cache[key] = {
-                "absorbance": A, "sample": s, "background": b,
-                "s_applied": sc["applied"], "s_pvalue": sc["pvalue"],
-                "s_nt": sc["nt_um"], "b_applied": bc["applied"],
-                "b_pvalue": bc["pvalue"], "b_nt": bc["nt_um"]}
+            recipe = self._defringe_recipe(r)
+            sc = fringe_apply.clean_channel(r["wl"], r["samp_c"],
+                                            **self._notch_kw("samp_c",
+                                                             recipe=recipe))
+            bc = fringe_apply.clean_channel(r["wl"], r["bg_c"],
+                                            **self._notch_kw("bg_c",
+                                                             recipe=recipe))
+            self.notch_cache[key] = self._notch_pack(r, sc, bc)
         return self.notch_cache[key]
 
     # ---- fringe thickness (n*t) per trace ---------------------------------
@@ -15493,32 +16155,40 @@ class App:
         """Detection kwargs for the thickness read.
 
         The workbench's gates and half-width, deliberately WITHOUT its
-        published notch set: the thickness plot reports what the detector
-        finds in the raw counts, not which peaks somebody chose to take
-        out afterwards.
+        notch set: the thickness plot reports what the detector finds in
+        the raw counts, not which peaks somebody chose to take out
+        afterwards.
+
+        The display and the CSVs read each trace's own workbench recipe, and
+        this read stays where it is. n*t here is a MEASUREMENT of the
+        dominant fringe; feeding it the picked centres would make it report
+        the picks back, and a thickness series would then track the hand
+        that made it rather than the sample. The Fisher p gate holds for the
+        same reason: a channel with no confident fringe reports nothing,
+        never a guess.
         """
         return self._notch_params()
 
     def _nt_result(self, r):
         """{'s': n*t um or None, 'b': ..., 'sp': p-value, 'bp': ...} for one
-        trace, cached per label. Computed by the SAME public detector the
-        notch export uses (defringe.defringe_channel on the raw Sample and
-        Background counts), so a number on the Thickness plot is the number
-        the CSV would carry. A channel with no confident fringe reports
-        None, never a guess."""
+        trace, cached per label. Computed by fringe_apply.detect_nt, the same
+        corroborated detector the cleaning runs (narrow, wide and full
+        windows, two of three must agree), so a number on the Thickness plot
+        is the n*t the workbench readout, the fringe report and the CSV
+        carry. Notch-set independent by design. A channel with no confident
+        fringe reports None, never a guess."""
         key = r["label"]
         if key not in self._nt_cache:
             kw = self._nt_params()
             try:
-                sc = defringe.defringe_channel(r["wl"], r["samp_c"], **kw)
-                bc = defringe.defringe_channel(r["wl"], r["bg_c"], **kw)
+                s_nt, s_pv = fringe_apply.detect_nt(r["wl"], r["samp_c"], **kw)
+                b_nt, b_pv = fringe_apply.detect_nt(r["wl"], r["bg_c"], **kw)
             except Exception as e:
                 self._nt_cache[key] = {"s": None, "b": None, "sp": 1.0,
                                        "bp": 1.0, "err": str(e)}
                 return self._nt_cache[key]
-            self._nt_cache[key] = {"s": sc["nt_um"], "b": bc["nt_um"],
-                                   "sp": sc["pvalue"], "bp": bc["pvalue"],
-                                   "err": None}
+            self._nt_cache[key] = {"s": s_nt, "b": b_nt, "sp": s_pv,
+                                   "bp": b_pv, "err": None}
         return self._nt_cache[key]
 
     def _nt_series(self, records):
@@ -15564,12 +16234,40 @@ class App:
         except tk.TclError:
             pass
 
+    @staticmethod
+    def _num_or_dash(v, fmt="%.1f"):
+        """`fmt % v`, or '-' when there is no number.
+
+        Every reader of a detected n*t or a Fisher p goes through here. Both
+        are None on a channel with no confident fringe, and `"%.1f" % None`
+        is a TypeError - raised inside a Tk callback, where before R17 it
+        was invisible and killed the redraw on the next line (F1).
+        """
+        try:
+            return "-" if v is None else fmt % float(v)
+        except (TypeError, ValueError):
+            return "-"
+
+    @classmethod
+    def _nt_tag(cls, nt):
+        """'n*t=12.3um' for a detected fringe, 'low-pass only' for a channel
+        the cleaning touched with nothing detected behind it."""
+        return ("low-pass only" if nt is None
+                else "n*t=%sum" % cls._num_or_dash(nt))
+
     def _defringe_report(self, quiet=False):
-        """Log a per-pressure fringe-detection summary at the current width.
-        quiet=True (auto-run on enable) skips the no-data popup."""
-        if not self.results:
+        """Log a per-pressure fringe summary for the traces on screen.
+
+        P8: the pass behind this line is an FFT per channel per trace, and
+        it used to run over every LOADED trace - 40 of them for the 3 on
+        screen. The report describes the plot, so it describes what the
+        plot draws. quiet=True (auto-run on enable) skips the no-data popup.
+        """
+        shown = self._shown()
+        if not shown:
             if not quiet:
-                messagebox.showinfo("Defringe", "Run a folder to load data.")
+                messagebox.showinfo(
+                    "Defringe", "Run a folder and tick a trace to load data.")
             return
         nkw = self._notch_params()
         self._logline("Defringe report (half-width +/-%g um, n*t %g-%g um, "
@@ -15577,18 +16275,37 @@ class App:
                       % (nkw["halfwidth_um"], nkw["nt_min_nm"] / 1000.0,
                          nkw["nt_max_nm"] / 1000.0, nkw["pvalue_max"]))
         nf = 0
-        for r in sorted(self.results, key=lambda rr: rr["pressure_val"]):
+        for r in sorted(shown, key=lambda rr: rr["pressure_val"]):
             nr = self._notch_result(r)
             tags = []
-            if nr["s_applied"]:
-                tags.append("S n*t=%.1fum p=%.0e" % (nr["s_nt"], nr["s_pvalue"]))
-            if nr["b_applied"]:
-                tags.append("B n*t=%.1fum p=%.0e" % (nr["b_nt"], nr["b_pvalue"]))
-            if tags:
+            found = False
+            # Every channel gets a word, cleaned or not.  A channel with no
+            # detected fringe is left exactly as it came in (his gating), and
+            # on the Y03 series that is 14 of 36 channels: listing only the
+            # cleaned ones left half the report blank, and a reader could not
+            # tell a channel that was examined and rejected from one the pass
+            # never reached.  His own panel says it in the same words,
+            # "no fringe detected (p=..)".
+            for ch, applied, nt, pv in (
+                    ("S", nr["s_applied"], nr["s_nt"], nr["s_pvalue"]),
+                    ("B", nr["b_applied"], nr["b_nt"], nr["b_pvalue"])):
+                if applied:
+                    found = True
+                    tags.append("%s %s p=%s"
+                                % (ch, self._nt_tag(nt),
+                                   self._num_or_dash(pv, "%.0e")))
+                else:
+                    tags.append("%s no fringe (p=%s)"
+                                % (ch, self._num_or_dash(pv, "%.0e")))
+            picked = max(len(nr.get("s_centers") or ()),
+                         len(nr.get("b_centers") or ()))
+            if picked:
+                tags.append("%d centre(s) from the workbench" % picked)
+            if found:
                 nf += 1
             self._logline("  %-24s %s" % (r["label"], ", ".join(tags) or "no fringe"))
-        self._logline("Fringe detected in %d / %d trace(s)."
-                      % (nf, len(self.results)))
+        self._logline("Fringe detected in %d / %d trace(s) on screen."
+                      % (nf, len(shown)))
 
     def _notch_on(self):
         return bool(getattr(self, "show_notch", None)) and self.show_notch.get()
@@ -15618,29 +16335,215 @@ class App:
         There is no width to defend any more. The parameters are the
         fringe workbench's, and they carry sensible defaults whether or
         not anyone has ever opened it.
-        """
-        self.notch_cache.clear()
-        self.smooth_cache.clear()
-        self._log_action("Defringe (FFT notch) %s"
-                         % ("on" if self.show_notch.get() else "off"))
-        if self.show_notch.get() \
-                and not self.settings.get("fr_suppress_report"):
-            self._defringe_report(quiet=True)
-        self._redraw()
 
-    def _notch_params_changed(self):
+        Switching it ON runs the pass on the Run worker (P8/Q7): an FFT
+        per channel per shown trace held the main thread for seconds with
+        a cursor change for company. The report and the redraw follow the
+        pass, on the main thread.
+        """
+        self.smooth_cache.clear()
+        on = self.show_notch.get()
+        self._log_action("Defringe (FFT notch) %s" % ("on" if on else "off"))
+        # One master switch: the workbench's own cleaned curve answers to it
+        # as well, so there is no state in which one view is cleaning and the
+        # other is not. It is told whenever it exists at all, whatever view
+        # is in front: a pop-out can be open and focused while the main
+        # window still shows the Plot tab, and gating the call on an active
+        # tab is what left that pop-out painting the old curve (R17 F2).
+        # Which surfaces repaint is the workbench's decision, not this
+        # switch's.
+        wb = getattr(self, "_fringe", None)
+        fn = getattr(wb, "on_defringe_switch", None)
+        if wb is not None and callable(fn):
+            try:
+                fn()
+            except Exception as e:
+                try:
+                    self._logline("  Fringe workbench repaint failed: %r"
+                                  % (e,))
+                except Exception:
+                    pass
+        if not on:
+            self._redraw()
+            return
+
+        def after():
+            # THE PLOT FIRST. The report is a log line about the pass, and
+            # before R17 it ran ahead of the redraw: one channel cleaned
+            # without a detected fringe made it raise, the redraw below
+            # never happened, and the switch looked dead (F1). A report can
+            # fail; a repaint the user asked for cannot wait on it.
+            self._redraw()
+            try:
+                if self.show_notch.get() \
+                        and not self.settings.get("fr_suppress_report"):
+                    self._defringe_report(quiet=True)
+            except Exception as e:
+                try:
+                    self._logline("  Defringe report failed: %r" % (e,))
+                except Exception:
+                    pass
+
+        def cancelled(done, total):
+            self._logline("Defringe stopped at %d of %d trace(s); the switch "
+                          "is off." % (done, total))
+            try:
+                self.show_notch.set(False)
+            except tk.TclError:
+                pass
+            self._redraw()
+
+        self._defringe_pass(then=after, on_cancel=cancelled)
+
+    # ---- the defringe pass, on the Run worker (P8 / Q7) --------------------
+    def _defringe_pass(self, records=None, then=None, on_cancel=None):
+        """Fill the defringe cache for the traces on screen, off the thread
+        that draws.
+
+        Every tk read happens HERE, before the worker starts: each trace's
+        recipe is read out into plain kwargs, and the worker then does numpy
+        over arrays already in memory. The Run's own worker slot, queue,
+        progress bar and Cancel button carry it, so a pass and a run can
+        never both be under way.
+
+        `then` runs on the main thread when the pass ends; `on_cancel(done,
+        total)` runs instead when Cancel stopped it.
+        """
+        recs = list(self._shown() if records is None else records)
+        todo = [r for r in recs if r["label"] not in self.notch_cache]
+        if not todo or self._run_busy() or getattr(self, "root", None) is None:
+            for r in todo:            # a run owns the worker: stay in-line
+                try:
+                    self._notch_result(r)
+                except Exception as e:
+                    self._logline("  DEFRINGE FAIL %s: %r" % (r["label"], e))
+            # the caller's own completion callback, so the in-line branch
+            # gets the same redraw-then-report order as the worker one (F1)
+            if callable(then):
+                then()
+            return
+        jobs = []
+        for r in todo:
+            recipe = self._defringe_recipe(r)
+            jobs.append((r, self._notch_kw("samp_c", recipe=recipe),
+                         self._notch_kw("bg_c", recipe=recipe)))
+        q = queue.Queue()
+        cancel = threading.Event()
+        self._df_queue = q
+        self._run_cancel = cancel
+        self._df_then, self._df_on_cancel = then, on_cancel
+        self._df_done, self._df_total = 0, len(jobs)
+        self._df_prev_state = getattr(self, "_last_run_state",
+                                      ("Ready", "#2a8a4a"))
+
+        def worker():
+            for rec, skw, bkw in jobs:
+                if cancel.is_set():
+                    break
+                try:
+                    sc = fringe_apply.clean_channel(rec["wl"], rec["samp_c"],
+                                                    **skw)
+                    bc = fringe_apply.clean_channel(rec["wl"], rec["bg_c"],
+                                                    **bkw)
+                    q.put(("trace", rec["label"], self._notch_pack(rec, sc, bc)))
+                except Exception as e:
+                    q.put(("fail", rec["label"], e))
+            q.put(("done", cancel.is_set(), None))
+
+        self._logline("Defringe: cleaning %d trace(s)…" % len(jobs))
+        try:
+            self.run_prog.config(mode="determinate", value=0,
+                                 maximum=max(1, len(jobs)))
+            self._show_progbar(True)
+            self._set_run_state("Defringing…", "#c08000")
+            self.run_btn.config(text="Cancel", command=self._cancel_run)
+        except (tk.TclError, AttributeError):
+            pass
+        self._run_thread = threading.Thread(target=worker, daemon=True)
+        self._run_thread.start()
+        self._poll_defringe()
+
+    def _poll_defringe(self):
+        """Main-thread pump for the defringe pass."""
+        q = getattr(self, "_df_queue", None)
+        if q is None:
+            return
+        try:
+            while True:
+                kind, label, payload = q.get_nowait()
+                if kind == "done":
+                    # the second slot carries the cancelled flag on this one
+                    self._finish_defringe(bool(label))
+                    return
+                if kind == "trace":
+                    self.notch_cache[label] = payload
+                    self.smooth_cache.pop(label, None)
+                else:
+                    self._logline("  DEFRINGE FAIL %s: %r" % (label, payload))
+                self._df_done += 1
+                try:
+                    self.run_prog.step(1)
+                except Exception:
+                    pass
+        except queue.Empty:
+            pass
+        try:
+            self._df_after = self.root.after(40, self._poll_defringe)
+        except tk.TclError:
+            self._df_queue = None
+
+    def _finish_defringe(self, cancelled):
+        """Hand the window back and run whatever waited on the pass."""
+        self._df_queue = None
+        then, on_cancel = self._df_then, self._df_on_cancel
+        self._df_then = self._df_on_cancel = None
+        try:
+            self._show_progbar(False)
+            self.run_prog.config(value=0)
+            self.run_btn.config(text="Run", command=self._run, state="normal")
+            self._set_run_state(*self._df_prev_state)
+        except (tk.TclError, AttributeError):
+            pass
+        if cancelled:
+            if callable(on_cancel):
+                on_cancel(self._df_done, self._df_total)
+            return
+        if callable(then):
+            then()
+
+    def _notch_params_changed(self, gates=True, label=None):
         """A defringe parameter moved in the workbench: drop everything
         cached off it, and redraw if it is on screen.
 
         Called from fringe_panel after a detection-gate edit, a
-        half-width change, or a 'Write to defringe'. It is the ONE way
-        the workbench reaches the main plot's defringe, which is what
-        makes the workbench the single source of truth rather than
-        merely the prettier one.
+        half-width change, or an edit to one trace's notch list. It is
+        the ONE way the workbench reaches the main plot's defringe, which
+        is what makes the workbench the single source of truth rather
+        than merely the prettier one.
+
+        `gates` False says the gates held still, so the thickness read -
+        which is a detection, and an expensive one over a series - keeps
+        its cache. `label` names the one trace whose cleaning moved;
+        None, the default, means all of them.
         """
-        self.notch_cache.clear()
-        self.smooth_cache.clear()
-        self._nt_cache.clear()   # the gates are what detection reads
+        # a custom quantity can read the defringed channels (Af / Sf / Bf),
+        # and its own signature carries the gates but not one trace's list
+        if label is None:
+            self.notch_cache.clear()
+            self.smooth_cache.clear()
+            self._qty_cache.clear()
+        else:
+            self.notch_cache.pop(label, None)
+            self.smooth_cache.pop(label, None)
+            self._qty_cache.pop(label, None)
+        if gates:
+            self._nt_cache.clear()   # the gates are what detection reads
+        # Every OTHER session tab holds its own dicts (_capture_session /
+        # _tab_load rebind the live names onto them), so the clears above
+        # reach the front tab only. A parameter edited from tab 2 has to
+        # invalidate tab 1 as well, or tab 1 comes back to a curve cleaned
+        # at a setting that no longer exists (F5).
+        self._drop_session_caches(label, gates)
         if not self.results or getattr(self, "_restoring", False):
             return
         try:
@@ -15664,6 +16567,33 @@ class App:
             self._df_redraw_job = self.root.after(400, self._df_redraw_now)
         except tk.TclError:
             self._redraw()
+
+    def _drop_session_caches(self, label=None, gates=True):
+        """Mirror the live cache invalidation into the sessions the user is
+        not looking at.
+
+        Exactly what _notch_params_changed does to the live dicts, and no
+        more: the whole dict when `label` is None, that one label otherwise,
+        and the detection cache only when the gates moved. The live dicts
+        ARE the active session's dicts (the same objects), so those are
+        skipped rather than cleared twice.
+        """
+        keys = ["notch_cache", "smooth_cache"] + (["nt_cache"] if gates
+                                                  else [])
+        live = {"notch_cache": getattr(self, "notch_cache", None),
+                "smooth_cache": getattr(self, "smooth_cache", None),
+                "nt_cache": getattr(self, "_nt_cache", None)}
+        for s in getattr(self, "sessions", None) or ():
+            if not isinstance(s, dict):
+                continue
+            for key in keys:
+                d = s.get(key)
+                if not isinstance(d, dict) or d is live[key]:
+                    continue
+                if label is None:
+                    d.clear()
+                else:
+                    d.pop(label, None)
 
     def _df_redraw_now(self):
         self._df_redraw_job = None
@@ -16345,7 +17275,7 @@ class App:
         return step
 
     def _surface_marked_ridges(self, shown, ridges, ypos, zlo, zhi,
-                               cmap_name, lw):
+                               cmap_name, lw, basis=None):
         """Draw every MEASURED trace as a line on the 3D surface.
 
         Most rows of the sheet are interpolation. These lines sit on the
@@ -16387,7 +17317,7 @@ class App:
                 continue
             col = fixed
             if col is None:
-                s = self._trace_color(r, cmap_name, shown)
+                s = self._trace_color(r, cmap_name, shown, basis)
                 lum = 0.2126 * s[0] + 0.7152 * s[1] + 0.0722 * s[2]
                 col = (0.0, 0.0, 0.0) if lum > 0.5 else (1.0, 1.0, 1.0)
             step = max(1, len(x) // 600)
@@ -18152,8 +19082,9 @@ class App:
 
         entries = []
         self._pick_map = {}
+        _basis = self._color_basis(shown)      # P9: once, not once per trace
         for rank, r in enumerate(shown):
-            color = self._trace_color(r, cmap_name, shown)
+            color = self._trace_color(r, cmap_name, shown, _basis)
             x = unit_x(r, unit)
             lkw = self._markevery(self._trace_line_kw(r, lw), len(x))
             off = rank * step if stacked else 0.0
@@ -18190,12 +19121,74 @@ class App:
             entries.append((line, r["pressure_val"], self._branch_of(r), r))
             if stacked and self.wf_label.get():
                 xs = x[np.isfinite(x)]
-                if len(xs):
+                # A trace with no finite y (a raw-only [S+B] record, say) has
+                # no median to sit at: nanmedian warns and answers NaN, and
+                # the label goes nowhere. Such a trace gets no label (F4).
+                if len(xs) and np.any(np.isfinite(y)):
                     self.ax.text(np.nanmax(xs), np.nanmedian(y), "%.1f" %
                                  r["pressure_val"], fontsize=7, va="center",
                                  color=color)
         self._legend_or_colorbar(entries, cmap_name, pmin, pmax,
                                  ScalarMappable, Normalize)
+
+    # how many interpolated 3D sheets to keep: enough to flip between a
+    # couple of looks without rebuilding, small enough to stay cheap
+    SURF_CACHE_MAX = 6
+
+    def _surface_for(self, ridges, ypos, shown, unit, chan, use_sm, cap,
+                     zlog):
+        """The interpolated 3D sheet for THIS draw, built once and reused.
+
+        P3: export3d.surface_from_traces resamples every trace onto a shared
+        wavelength axis and interpolates between the series values. It ran
+        again on every redraw, including the redraws that move only a
+        colour, a line width or the camera, and it is the slowest step of a
+        3D draw once there are a working number of traces.
+
+        The key names the controls the grid comes from -- which traces, in
+        which unit, from which channel, smoothed or not, decimated to what
+        cap, on a log Z or not, at what series positions, through which
+        interpolation -- AND carries a digest of the arrays that were
+        actually handed over. The digest is what makes the key safe: a
+        number that changes by any other route (the defringe switch, an
+        edited formula, a fresh run) moves it too, so a stale sheet cannot
+        be served. It costs one pass over arrays already in memory."""
+        key = None
+        try:
+            _qsig = None
+            if str(chan).startswith(QTY_YDATA_PREFIX):
+                _qsig = tuple((q["key"], q["expr"]) for q in self.quantities)
+            key = (tuple(r["label"] for r in shown), str(unit), str(chan),
+                   bool(use_sm),
+                   (tuple(sorted((str(k), str(v))
+                                 for k, v in self.smooth_params.items()))
+                    if use_sm else None),
+                   int(cap or 0), bool(zlog), _qsig,
+                   tuple(round(float(_y), 9) for _y in ypos),
+                   self._surf_interp(),
+                   tuple((int(_xx.size),
+                          float(_xx[0]) if _xx.size else 0.0,
+                          float(_xx[-1]) if _xx.size else 0.0,
+                          float(np.nansum(_xx)) if _xx.size else 0.0,
+                          float(np.nansum(_zz)) if _zz.size else 0.0,
+                          float(np.nanmax(_zz)) if _zz.size else 0.0)
+                         for _xx, _zz in ridges))
+        except Exception:
+            key = None            # unkeyable input: build it every time
+        cache = getattr(self, "_surf_cache", None)
+        if cache is None:
+            cache = self._surf_cache = {}
+        if key is not None and key in cache:
+            return cache[key]
+        grid = export3d.surface_from_traces(
+            [_xx for _xx, _zz in ridges],
+            [_zz for _xx, _zz in ridges], ypos,
+            method=self._surf_interp())
+        if key is not None:
+            if len(cache) >= self.SURF_CACHE_MAX:
+                cache.clear()
+            cache[key] = grid
+        return grid
 
     # ---- 3D ridge waterfall (journal-ready) ------------------------------
     def _draw_wf3d(self, unit, cmap_name, lw):
@@ -18218,6 +19211,7 @@ class App:
         pvals = [r["pressure_val"] for r in shown]
         rev = self.cmap_rev.get()
         n = len(shown)
+        _basis = self._color_basis(shown)      # P9: four loops share it
         chan = self.ydata.get()
         use_sm = chan == "absorbance" and self.show_smooth.get()
         lw = float(self.wf3d_lw.get())          # 3D outline width (own control)
@@ -18329,10 +19323,8 @@ class App:
         _surf = None
         if self.wf_mode.get() == "3D shape" or self.wf3d_look.get() == "Surface":
             try:
-                _surf = export3d.surface_from_traces(
-                    [_xx for _xx, _zz in ridges],
-                    [_zz for _xx, _zz in ridges], ypos,
-                    method=self._surf_interp())
+                _surf = self._surface_for(ridges, ypos, shown, unit, chan,
+                                          use_sm, cap, zlog)
             except Exception as _se:
                 self._warn_once(
                     "wf3d_surface", "3D surface",
@@ -18373,7 +19365,7 @@ class App:
             if bool(self._safe_get(getattr(self, "wf3d_surf_ridges", None),
                                    True)):
                 self._surface_marked_ridges(shown, ridges, ypos, zlo, zhi,
-                                            cmap_name, lw)
+                                            cmap_name, lw, _basis)
             # say so when the picture is not the interpolation that was
             # asked for -- silently degrading is what the meta exists to
             # prevent (a 3-trace series cannot carry a cubic)
@@ -18433,7 +19425,7 @@ class App:
                 if len(x) < 2:
                     continue
                 yv = ypos[rank]
-                col = self._trace_color(r, cmap_name, shown)
+                col = self._trace_color(r, cmap_name, shown, _basis)
                 # a filled ridge shows only its EDGE, so the D branch's
                 # pattern and width carry over; opacity and markers have no
                 # meaning on a Poly3DCollection edge and are not applied
@@ -18487,7 +19479,7 @@ class App:
                     except Exception:
                         _frgb = (0, 0, 0)
             for rank, (r, (x, z)) in enumerate(zip(shown, ridges)):
-                col = self._trace_color(r, cmap_name, shown)
+                col = self._trace_color(r, cmap_name, shown, _basis)
                 lcol = col if color_lines else _frgb
                 _l3 = self._plot_branch(
                     (x, np.full_like(x, ypos[rank]), np.clip(z, zlo, zhi)),
@@ -18513,7 +19505,7 @@ class App:
                 if not _fin.any():
                     continue
                 _i = np.where(_fin)[0][-1]
-                _cl = self._trace_color(r, cmap_name, shown)
+                _cl = self._trace_color(r, cmap_name, shown, _basis)
                 self.ax.text(float(x[_i]), ypos[rank],
                              float(np.clip(z[_i], zlo, zhi)),
                              _gap3 + ("%.2f" % r["pressure_val"]),
@@ -18530,7 +19522,7 @@ class App:
             for rank, (r, (x, z)) in enumerate(zip(shown, ridges)):
                 if len(x) < 2:
                     continue
-                pcol = self._trace_color(r, cmap_name, shown)
+                pcol = self._trace_color(r, cmap_name, shown, _basis)
                 zc = np.clip(z, zlo, zhi)
                 if proj in ("Back wall", "Both"):
                     bl = self.ax.plot(x, np.full_like(x, y_back), zc,
@@ -18829,7 +19821,7 @@ class App:
             import matplotlib.patches as mpatches
             entries = []
             for rank, r in enumerate(shown):
-                col = self._trace_color(r, cmap_name, shown)
+                col = self._trace_color(r, cmap_name, shown, _basis)
                 entries.append((mpatches.Patch(facecolor=col, edgecolor="none"),
                                 r["pressure_val"], self._branch_of(r), r))
             h, l = self._ordered_legend(entries)
@@ -19185,10 +20177,10 @@ class App:
         for r, d in rows:
             tv.insert("", "end", values=(
                 self._vfmt(r["pressure_val"]), self._branch_of(r),
-                ("%.3f" % d["s"]) if d["s"] is not None else "-",
-                "%.1e" % d["sp"],
-                ("%.3f" % d["b"]) if d["b"] is not None else "-",
-                "%.1e" % d["bp"]))
+                self._num_or_dash(d["s"], "%.3f"),
+                self._num_or_dash(d["sp"], "%.1e"),
+                self._num_or_dash(d["b"], "%.3f"),
+                self._num_or_dash(d["bp"], "%.1e")))
 
     # ---- smoothing settings (resizable + scrollable; Apply pinned) -------
     def _build_smooth_explainer(self, win):
@@ -19789,9 +20781,12 @@ class App:
         The cache is dropped whenever this changes, which is cheaper and far
         harder to get wrong than invalidating from a dozen call sites."""
         nk = self._notch_params()
+        # the per-trace cleaning is not in here: it reaches this cache
+        # through _notch_params_changed, which drops the notch results the
+        # formulas read (Af / Sf / Bf) as the workbench moves them
         return (q["key"], q["expr"], self._notch_on(),
                 nk["halfwidth_um"], nk["nt_min_nm"], nk["nt_max_nm"],
-                nk["pvalue_max"], repr(sorted(self._notch_channels().items())),
+                nk["pvalue_max"],
                 bool(self.show_smooth.get()),
                 tuple(sorted((str(k), str(v))
                              for k, v in self.smooth_params.items())),
@@ -19911,8 +20906,15 @@ class App:
                         bbox_inches="tight", pad_inches=0.03)
             img = tk.PhotoImage(
                 data=base64.b64encode(buf.getvalue()).decode("ascii"))
-        except Exception:
+        except Exception as _mt_err:
+            # the caller degrades to plain text, which looks deliberate;
+            # say what happened so a bad formula is traceable
             img = None
+            try:
+                self._logline("! formula image failed for %r: %r"
+                              % (tex[:60], _mt_err))
+            except Exception:
+                pass
         if len(cache) > 240:              # theme + text-size churn, bounded
             cache.clear()
         cache[key] = img
@@ -19929,10 +20931,66 @@ class App:
         background, a bold name, and an "on plot" tag in the accent color.
         The tag is the accessibility carrier - High Contrast and Colorblind
         Safe cannot be asked to convey state with a tint alone - and on a
-        built-in it sits to the left of the padlock."""
+        built-in it sits to the left of the padlock.
+
+        SIGNATURE-GUARDED (R15-F/P1), on the pattern the notch list uses.
+        Two signatures, because the two kinds of change cost different
+        things:
+
+        * the STRUCTURE -- which formulas exist, what they are called, and
+          which one is on plot -- decides whether the rows are rebuilt;
+        * the LOOK -- palette, accent, body size, icon set -- decides
+          whether the rows already on screen are re-tinted in place.
+
+        A call that moves neither returns at once, and _apply_brand makes
+        this call on every theme switch and every text-size step. MEASURED
+        on the 1160-widget tree: destroying and repacking the rows costs
+        about 36 ms, while the one ttk style write below invalidates every
+        widget in the app and costs about 700 ms in the relayout that
+        follows. So the style write is guarded on its own colour, and the
+        typeset formulas -- images in the text colour at the body size --
+        come back from the cache that is keyed on exactly those two."""
         holder = getattr(self, "_qty_list", None)
         if holder is None:
             return
+        try:
+            if not holder.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        keys = [q["key"] for q in self.quantities]
+        if self._qty_sel.get() not in keys:
+            self._qty_sel.set("")          # no dot = nothing plotted from here
+        uibg, fgc = self._theme_palette()[0], self._theme_palette()[1]
+        br = self._brand()
+        # the tint is derived, never hardcoded, so it follows every theme;
+        # the three row cues are re-derived from it whenever the theme
+        # moves (the typeset formulas are images in the text color).
+        tint = self._blendc(uibg, br["ac1"], 0.12)
+        ic = getattr(self, "_icons", {})
+        _struct = (tuple((q["key"], q["name"], q["unit"], q["expr"],
+                          q.get("latex") or "", formulas.is_builtin(q))
+                         for q in self.quantities),
+                   self._qty_sel.get(), ic.get("lock") is not None)
+        _look = (self.theme_mode.get(), uibg, fgc, tint, br["ac1"],
+                 int(getattr(self, "_body_size", 9)),
+                 str(ic.get("lock", "")))
+        try:
+            # something outside this method emptied the holder: rebuild
+            _gone = bool(self.quantities) and not holder.winfo_children()
+        except tk.TclError:
+            _gone = True
+        if not _gone and _struct == getattr(self, "_qty_struct_sig", None):
+            if _look == getattr(self, "_qty_look_sig", None):
+                self._sync_qty_buttons()
+                return                     # nothing on this panel moved
+            if self._qty_retint(uibg, fgc, tint, br, ic):
+                self._qty_tint_style(tint)
+                self._qty_look_sig = _look
+                self._sync_qty_buttons()
+                return
+            # a row could not follow in place: fall through and rebuild
+        self._qty_struct_sig = None        # a rebuild that dies leaves no lie
         for w in list(holder.winfo_children()):
             try:
                 w.destroy()
@@ -19946,25 +21004,13 @@ class App:
         # walk the list up either.
         self._prune_content_labels()
         self._qty_rows = []
-        keys = [q["key"] for q in self.quantities]
-        if self._qty_sel.get() not in keys:
-            self._qty_sel.set("")          # no dot = nothing plotted from here
-        uibg, fgc = self._theme_palette()[0], self._theme_palette()[1]
-        br = self._brand()
-        # the tint is derived, never hardcoded, so it follows every theme;
-        # _apply_brand rebuilds this list on a theme switch (the typeset
-        # formulas are images in the text color), so the cues follow too.
-        tint = self._blendc(uibg, br["ac1"], 0.12)
-        try:
-            _st = ttk.Style()
-            _st.configure("QtyOn.TRadiobutton", background=tint)
-            _st.map("QtyOn.TRadiobutton", background=[("active", tint)])
-        except tk.TclError:
-            pass
-        ic = getattr(self, "_icons", {})
+        self._qty_recs = []
+        self._qty_tint_style(tint)
         for q in self.quantities:
             on = (q["key"] == self._qty_sel.get())
             rbg = tint if on else uibg
+            lk = tag = None
+            lk_img = False
             blk = tk.Frame(holder, bg=rbg, bd=0, highlightthickness=0)
             blk.pack(fill="x", pady=(1, 3))
             top = tk.Frame(blk, bg=rbg, bd=0, highlightthickness=0)
@@ -19983,6 +21029,7 @@ class App:
                     lk = tk.Label(top, image=ic["lock"], bd=0,
                                   highlightthickness=0, bg=rbg)
                     lk.image = ic["lock"]
+                    lk_img = True
                 else:
                     lk = self._lbl(top, text="[b]", font=self._F(-1), bg=rbg)
                 lk.pack(side="right")
@@ -20009,17 +21056,122 @@ class App:
                               font=self._F(-1, mono=True))
             m.pack(side="left", padx=(2, 6))
             nm = q["name"] + ((" (%s)" % q["unit"]) if q["unit"] else "")
-            self._lbl(top, text=nm, bg=rbg,
-                      font=(self._F(0, "bold") if on else self._F(0))
-                      ).pack(side="left")
-            self._lbl(blk, text=self._quantity_row_text(q), bg=rbg,
-                      font=self._F(-1), foreground=MUTED).pack(
-                anchor="w", padx=(20, 0))
+            nml = self._lbl(top, text=nm, bg=rbg,
+                            font=(self._F(0, "bold") if on else self._F(0)))
+            nml.pack(side="left")
+            usl = self._lbl(blk, text=self._quantity_row_text(q), bg=rbg,
+                            font=self._F(-1), foreground=MUTED)
+            usl.pack(anchor="w", padx=(20, 0))
             self._qty_rows.append((q["key"], blk, m))
+            self._qty_recs.append(
+                {"key": q["key"], "latex": q.get("latex") or "", "on": on,
+                 "blk": blk, "top": top, "math": m, "math_img": img is not None,
+                 "name": nml, "uses": usl, "lock": lk, "lock_img": lk_img,
+                 "tag": tag})
         for rec in getattr(self, "_collapsibles", []):
             if rec.get("key") == "Formulas":
                 rec["search_text"] = None      # the search blob just changed
+        self._qty_struct_sig = _struct
+        self._qty_look_sig = _look
         self._sync_qty_buttons()
+
+    def _qty_tint_style(self, tint):
+        """The selected row's radiobutton ground, as its own ttk style.
+
+        Written only when the colour actually moves. A ttk style write
+        invalidates every widget in the tree, and this ran on every call to
+        _refresh_quantity_rows -- which is to say on every theme switch AND
+        every text-size step, where the tint is unchanged. The theme name
+        rides in the memo because sv_ttk's set_theme rebuilds the theme and
+        drops styles written against the previous one."""
+        want = (self.theme_mode.get(), tint)
+        if want == getattr(self, "_qty_tint", None):
+            return
+        self._qty_tint = want
+        try:
+            _st = ttk.Style()
+            _st.configure("QtyOn.TRadiobutton", background=tint)
+            _st.map("QtyOn.TRadiobutton", background=[("active", tint)])
+        except tk.TclError:
+            self._qty_tint = None          # style unknown after a failure
+
+    def _qty_retint(self, uibg, fgc, tint, br, ic):
+        """Follow a theme or text-size change without rebuilding the rows.
+
+        Only the LOOK moved: the typeset formulas come back from the
+        mathtext cache (keyed on text, colour and size, so a re-fetch at
+        the new colour or size is what a rebuild would have done anyway),
+        the row grounds and the three selection cues are re-derived, and
+        every widget stays where it is.
+
+        Returns True when every row followed. False means a row cannot be
+        retinted into what it should now be -- a formula that used to
+        typeset and no longer does, or a widget that has gone -- and the
+        caller rebuilds instead."""
+        recs = getattr(self, "_qty_recs", None)
+        if not recs:
+            return False
+        # _init_theme walks _content_labels and re-applies the background
+        # each label was BORN with, so a row that is retinted here has to
+        # correct its record as well or the next theme switch puts the old
+        # colour back.
+        _cl = getattr(self, "_content_labels", None)
+        _at = ({id(rec[0]): i for i, rec in enumerate(_cl)}
+               if _cl is not None else {})
+
+        _keep = ("keep",)          # sentinel: leave the recorded fg alone
+
+        def _ground(w, bg, cfg=_keep):
+            if w is None:
+                return True
+            try:
+                w.configure(bg=bg)
+            except tk.TclError:
+                return False
+            i = _at.get(id(w))
+            if i is not None:
+                _cl[i] = (_cl[i][0],
+                          _cl[i][1] if cfg is _keep else cfg, bg)
+            return True
+
+        for rec in recs:
+            rbg = tint if rec["on"] else uibg
+            img = self._mathtext_image(rec["latex"], fgc)
+            if (img is not None) != bool(rec["math_img"]):
+                return False           # the row's shape, not just its colour
+            try:
+                for w in (rec["blk"], rec["top"]):
+                    if not w.winfo_exists():
+                        return False
+                    w.configure(bg=rbg)
+                if not (_ground(rec["math"], rbg)
+                        and _ground(rec["name"], rbg)
+                        and _ground(rec["uses"], rbg)
+                        and _ground(rec["lock"], rbg)
+                        and _ground(rec["tag"], rbg, br["ac1"])):
+                    return False
+                if rec["math_img"]:
+                    rec["math"].configure(image=img)
+                    rec["math"].image = img
+                else:
+                    rec["math"].configure(font=self._F(-1, mono=True))
+                rec["name"].configure(
+                    font=(self._F(0, "bold") if rec["on"] else self._F(0)))
+                rec["uses"].configure(font=self._F(-1))
+                if rec["lock"] is not None and rec["lock_img"]:
+                    _li = ic.get("lock")
+                    if _li is None:
+                        return False
+                    rec["lock"].configure(image=_li)
+                    rec["lock"].image = _li
+                elif rec["lock"] is not None:
+                    rec["lock"].configure(font=self._F(-1))
+                if rec["tag"] is not None:
+                    rec["tag"].configure(foreground=br["ac1"],
+                                         font=self._F(-1, "bold"))
+            except (tk.TclError, KeyError, AttributeError):
+                return False
+        return True
 
     def _quantity_row_text(self, q):
         """The small gray line under a formula: the columns it reads."""
@@ -20172,6 +21324,7 @@ class App:
         for c in formulas.column_legend():
             txt.insert("end", "  %-3s " % c["name"], "m")
             txt.insert("end", c["desc"] + "\n", ("b",))
+        body(DF_SYMBOL_NOTE)
         body("Sf, Bf and Af exist only while df is ticked, and As only while "
              "Show smoothed is on. A formula that needs a missing column "
              "says so. The tool skips those traces and leaves a gap.")
@@ -20652,27 +21805,9 @@ class App:
             initialdir=start or None)
         if not folder:
             return
-        written, skipped = [], []
-        for r in self.results:
-            try:
-                vals = formulas.evaluate_quantity(q, self._formula_columns(r))
-                name = (re.sub(r"[^A-Za-z0-9.+-]+", "_", r["label"])
-                        + "_" + q["key"] + ".csv")
-                p = formulas.write_quantity_csv(
-                    os.path.join(folder, name),
-                    np.asarray(r["wl"], float), vals, q,
-                    meta={"formula": q["name"],
-                          "expr": q["expr"],
-                          "unit": q["unit"] or "(none)",
-                          "latex": q["latex"],
-                          "trace": r["label"],
-                          "tool": "%s %s" % (BRAND["name"], APP_VERSION)})
-                written.append(p)
-                self._logline("  QTY  %-30s -> %s"
-                              % (r["label"], os.path.basename(p)))
-            except Exception as e:
-                skipped.append(r["label"])
-                self._logline("  QTY FAIL %s: %s" % (r["label"], e))
+        # the loop itself is _write_formula_csvs, which the Formula CSV
+        # row of EXPORT > DATA FILES runs too: one writer, one file naming
+        written, skipped = self._write_formula_csvs(self.results, folder, q)
         self._logline("Saved %d '%s' CSV(s)%s -> %s"
                       % (len(written), q["name"],
                          (" (%d skipped)" % len(skipped)) if skipped else "",
@@ -21769,167 +22904,603 @@ class App:
             "smoothed": self.show_smooth.get(),
             "defringe": self.show_notch.get()})
 
-    def _export_defringed(self):
-        """Write {stem}_absorbance_notch.csv for every loaded pressure into a
-        chosen folder. Always defringes at the fringe workbench's current
-        settings, independent of the df display toggle."""
-        if not self.results:
-            messagebox.showinfo("Export", "Run a folder to load data."); return
-        folder = filedialog.askdirectory(title="Folder for defringed CSVs")
-        if not folder:
-            return
-        nkw = self._notch_params()
-        nch = self._notch_channels()
-        n = 0
-        written = []
-        for r in self.results:
-            try:
-                p = defringe.write_notch_csv(r, folder,
-                                             bg_kw=nch.get("bg_c"),
-                                             s_kw=nch.get("samp_c"), **nkw)
-                written.append(p)
-                self._logline("  NOTCH %-30s -> %s"
-                              % (r["label"], os.path.basename(p)))
-                n += 1
-            except Exception as e:
-                self._logline("  NOTCH FAIL %s: %r" % (r["label"], e))
-        self._logline("Exported %d defringed CSV(s) -> %s" % (n, folder))
-        self._provenance(folder, "defringed_csv",
-                         {"n_csv": n,
-                          "notch_params": dict(nkw, channels=nch)},
-                         files=written)
-        messagebox.showinfo("Export defringed CSV",
-                            "Wrote %d defringed CSV(s) to:\n%s" % (n, folder))
+    # ---- data files: one ticked list, one CSV per trace ------------------
+    def _products(self):
+        """Which rows are ticked in EXPORT > DATA FILES.
 
-    def _write_tagged_csvs(self, results, branches, folder):
-        """Write one branch-tagged absorbance CSV per result into folder.
+        Absorbance is always True: it is the reduction itself and the row
+        that says so is disabled. Three of the other four name COLUMNS and
+        the fourth (cd_tagged) names a file-name rule. They read their
+        Checkbutton, and fall back to SETTINGS (then to the shipped
+        default) while the section is not built yet, so a headless caller
+        gets the same answer the panel would give."""
+        out = {"absorbance": True}
+        held = getattr(self, "export_products", None) or {}
+        saved = self.settings.get("export_products")
+        if not isinstance(saved, dict):
+            saved = {}
+        for k in EXPORT_PRODUCT_ORDER:
+            if k == "absorbance":
+                continue
+            dflt = bool(saved.get(k, EXPORT_PRODUCT_DEFAULTS[k]))
+            v = held.get(k)
+            out[k] = bool(dflt if v is None else self._safe_get(v, dflt))
+        return out
 
-        Testable core of 'Save C/D-tagged CSVs': no dialogs, no Tk reads.
-        branches is either a mapping of a record's engine label to 'C' or
-        'D', or a SEQUENCE of branch letters positionally aligned with
-        results. The sequence form is what the button uses, because engine
-        labels are not unique - two groups whose values round to the same
-        2 decimals (12.500 / 12.501, or 12p5 / 12p50) share one label, and
-        a label-keyed dict then describes fewer points than there are
-        files. Anything not explicitly marked D is compression. Each file
-        is written by
-        engine.write_absorbance_csv on a COPY of the record whose
-        branch_tag is forced to that branch, so the name follows the rule
-        Run already uses ({DAC}_{sample}_{value}[_C|_D]_absorbance.csv) and
-        the contents are identical to the normal writer's, byte for byte.
-        Two points that would land on one name (same DAC / sample / value
-        AND same branch after the D toggles) get a -2, -3 ... on the value
-        part rather than overwriting each other. Returns the written paths
-        in results order."""
-        written, taken = [], set()
-        seq = None if isinstance(branches, dict) else list(branches or ())
-        for i, r in enumerate(results):
-            if seq is None:
-                raw = branches.get(r["label"], "C")
-            else:
-                raw = seq[i] if i < len(seq) else "C"
-            br = str(raw or "C").upper()
-            if br not in ("C", "D"):
-                br = "C"
-            rec = dict(r)
-            rec["branch_tag"] = br
-            base, n = rec["pressure_str"], 1
-            while True:
-                stem = ("%s_%s_%s_%s" % (rec["dac"], rec["sample"],
-                                         rec["pressure_str"], br)).lower()
-                if stem not in taken:
-                    break
-                n += 1
-                rec["pressure_str"] = "%s-%d" % (base, n)
-            taken.add(stem)
-            written.append(engine.write_absorbance_csv(rec, folder))
-        return written
+    def _persist_products(self):
+        """Remember the Data files ticks in SETTINGS.
 
-    def _export_branch_csvs(self):
-        """Export panel: the Run pipeline's per-point absorbance CSVs, every
-        file name carrying its branch letter. The branch is exactly what the
-        plot uses (_branch_of: auto-detected D plus the manual D toggles)."""
-        if not self.results:
-            messagebox.showinfo("Export", "Run a folder to load data."); return
-        start = (self.last_out_dir or self.out_var.get().strip()
-                 or self.in_var.get().strip())
-        folder = filedialog.askdirectory(
-            title="Folder for C/D-tagged absorbance CSVs",
-            initialdir=start or None)
-        if not folder:
-            return
-        # ONE branch letter per RECORD, in results order. The counts and the
-        # sidecar used to be derived from a {label: branch} dict, and engine
-        # labels are not unique (12.500 / 12.501 GPa both print '12.50'), so
-        # a folder with colliding labels reported fewer C/D files than it
-        # actually wrote - the log line and the provenance disagreed with
-        # the disk.
-        branch_list = [self._branch_of(r) for r in self.results]
-        try:
-            written = self._write_tagged_csvs(self.results, branch_list,
-                                              folder)
-        except OSError as e:
-            messagebox.showerror("Save C/D-tagged CSVs",
-                                 "Writing failed:%s%s%s(%s)"
-                                 % (chr(10), folder, chr(10), e))
-            return
-        nd = sum(1 for b in branch_list if b == "D")
-        # sidecar map: one entry per written FILE (the file names are unique
-        # by construction, the labels are not), so it can no longer describe
-        # fewer points than files were written
-        branches = {os.path.basename(p): b
-                    for p, b in zip(written, branch_list)}
-        for p in written:
-            self._logline("  C/D  %s" % os.path.basename(p))
-        self._logline("Saved %d C/D-tagged absorbance CSV(s) "
-                      "(%d C, %d D) -> %s"
-                      % (len(written), len(written) - nd, nd, folder))
-        self._provenance(folder, "branch_tagged_csv",
-                         {"n_csv": len(written),
-                          "n_compression": len(written) - nd,
-                          "n_decompression": nd,
-                          "branch_source": "auto-detected + manual D toggles",
-                          "branches": branches}, files=written)
-        messagebox.showinfo("Save C/D-tagged CSVs",
-                            "Wrote %d CSV(s) to:%s%s"
-                            % (len(written), chr(10), folder))
+        Crop is deliberately not among them: it belongs to one export, not
+        to the next Run.
 
-    def _export_smoothed(self):
-        import csv
-        shown = self._shown()
-        if not shown:
-            messagebox.showinfo("Export", "No traces selected."); return
-        folder = filedialog.askdirectory(title="Folder for smoothed CSVs")
-        if not folder:
-            return
+        Output preference, stored the way the folders and the rescan poll
+        are, and deliberately NOT in _preset_registry: a preset carries the
+        figure, so applying somebody else's preset must never change what a
+        Run puts on disk."""
+        p = self._products()
+        self.settings["export_products"] = {k: bool(p[k])
+                                            for k in EXPORT_PRODUCT_DEFAULTS}
+        self._save_settings()
+
+    def _crop_nm(self):
+        """The Export dialog's Crop row as (on, lo, hi) in nm.
+
+        An unreadable box means no crop. The variables outlive the dialog,
+        which is rebuilt on every open, so this reads the same off a closed
+        window; a Run never asks."""
         try:
             lo, hi = float(self.crop_min.get()), float(self.crop_max.get())
-        except ValueError:
+        except (ValueError, tk.TclError, AttributeError):
             lo = hi = None
-        written = []
-        for r in shown:
-            wl, wn = r["wl"], r["wn"]
-            ev = np.where(wl > 0, EV_NM / wl, np.nan)
-            raw, sm = r["absorbance"], self._smoothed(r)
-            mask = ((wl >= lo) & (wl <= hi)) if (self.crop_on.get()
-                    and lo is not None) else np.ones(len(wl), bool)
-            name = re.sub(r"[^A-Za-z0-9.+-]+", "_", r["label"]) + "_smoothed.csv"
-            fp = os.path.join(folder, name)
-            with open(fp, "w", newline="") as f:
-                w = csv.writer(f)
-                w.writerow(["Wavelength_nm", "Wavenumber_cm-1", "Energy_eV",
-                            "Absorbance_raw", "Absorbance_smoothed"])
-                for row in zip(wl[mask], wn[mask], ev[mask], raw[mask], sm[mask]):
-                    w.writerow(["" if (isinstance(v, float) and np.isnan(v))
-                                else v for v in row])
-            written.append(fp)
-        self._logline("Exported %d smoothed CSV(s) -> %s" % (len(shown), folder))
-        self._provenance(folder, "smoothed_csv",
-                         {"n_csv": len(shown),
-                          "smoothing": dict(self.smooth_params),
-                          "cropped": bool(self.crop_on.get()),
-                          "crop_nm": [lo, hi] if lo is not None else None},
-                         files=written)
+        on = bool(self._safe_get(getattr(self, "crop_on", None), False))
+        return (on and lo is not None), lo, hi
+
+    def _column_ticks(self):
+        """The ticked COLUMN providers, in the order their columns land.
+
+        cd_tagged is deliberately not in it: that tick is a rule about the
+        file NAME, not a column."""
+        p = self._products()
+        return [k for k in EXPORT_COLUMN_ORDER if p.get(k)]
+
+    @staticmethod
+    def _abs_csv_name(rec, branch=None):
+        """The name engine.write_absorbance_csv gives this record.
+
+        The C/D rule rewrites a trace's CSV under a DIFFERENT name, so the
+        untagged twin has to be found and removed, and that means knowing
+        the name engine would otherwise have used. One rule spelled in two
+        places, pinned by a test that compares the two."""
+        stem = "%s_%s_%s" % (rec["dac"], rec["sample"], rec["pressure_str"])
+        tag = branch or rec.get("branch_tag")
+        if tag:
+            stem += "_" + str(tag)
+        return stem + "_absorbance.csv"
+
+    def _notch_columns_for(self, r, recipes=None):
+        """(columns, recipe) for one record's three _notch columns.
+
+        Each trace is cleaned at its own workbench state: its centres, its
+        per-centre half-widths and its low-pass. A trace the workbench holds
+        nothing for cleans under the panel's global controls, at its own
+        detected fundamental. The df display switch does not enter into it.
+        """
+        rp = (recipes or {}).get(self._trace_stem(r))
+        if rp is None:
+            rp = self._defringe_recipe(r)
+        kw, bgk, sk = self._recipe_kwargs(rp)
+        return fringe_apply.notch_columns(r, bg_kw=bgk, s_kw=sk, **kw), rp
+
+    @staticmethod
+    def _formula_header(q):
+        """The formula column's header: the CSV key the formula editor
+        shows, with the formula's unit in brackets when it has one."""
+        key = str((q or {}).get("key") or "").strip() or "value"
+        unit = str((q or {}).get("unit") or "").strip()
+        return "%s [%s]" % (key, unit) if unit else key
+
+    def _formula_csv_header(self, q, want):
+        """The formula column's header INSIDE the trace's own CSV.
+
+        _formula_header gives the name the formula editor shows, and the
+        built-in Absorbance shows exactly "Absorbance", which is also one
+        of engine's six frozen base columns. Two columns of one name in
+        one file is a silent data loss: load_processed_folder finds its
+        columns BY NAME and keeps the later one, so re-loading the export
+        read the formula as the absorbance (Nhan, R20 H2). A header the
+        file already carries is written as "<header>_formula" instead, and
+        the rename is logged once, in words that say which column took the
+        name. `want` is the tick list the writer is working from, so the
+        extras that land before the formula are known before the first
+        record is written."""
+        taken = list(engine.ABSORBANCE_BASE_COLUMNS)
+        if "defringed" in want:
+            taken += list(NOTCH_COLUMNS)
+        if "smoothed" in want:
+            taken.append(SMOOTH_COLUMNS[0])
+            if "defringed" in want:
+                taken.append(SMOOTH_COLUMNS[1])
+        h = self._formula_header(q)
+        if h not in taken:
+            return h
+        why = ("a base column" if h in engine.ABSORBANCE_BASE_COLUMNS
+               else "another column")
+        new, n = h + "_formula", 1
+        while new in taken:
+            n += 1
+            new = "%s_formula_%d" % (h, n)
+        self._logline("  CSV   Formula column '%s' renamed %s: the name "
+                      "was taken by %s." % (h, new, why))
+        return new
+
+    def _write_formula_csvs(self, results, folder, q):
+        """The formula q for every record, one two-column CSV each.
+
+        Returns (paths, skipped_labels). A formula always goes to its OWN
+        files: the absorbance CSV schema is frozen, and mixing the two would
+        make a Run's output depend on what happened to be defined in the
+        panel."""
+        written, skipped = [], []
+        for r in results:
+            try:
+                vals = formulas.evaluate_quantity(q, self._formula_columns(r))
+                name = (re.sub(r"[^A-Za-z0-9.+-]+", "_", r["label"])
+                        + "_" + q["key"] + ".csv")
+                p = formulas.write_quantity_csv(
+                    os.path.join(folder, name),
+                    np.asarray(r["wl"], float), vals, q,
+                    meta={"formula": q["name"],
+                          "expr": q["expr"],
+                          "unit": q["unit"] or "(none)",
+                          "latex": q["latex"],
+                          "trace": r["label"],
+                          "tool": "%s %s" % (BRAND["name"], APP_VERSION)})
+                written.append(p)
+                self._logline("  QTY  %-30s -> %s"
+                              % (r["label"], os.path.basename(p)))
+            except Exception as e:
+                skipped.append(r["label"])
+                self._logline("  QTY FAIL %s: %s" % (r["label"], e))
+        return written, skipped
+
+    def _write_final_csvs(self, results, folder, columns=None, crop_nm=None,
+                          cd_names=None):
+        """ONE CSV per trace: the reduction's base columns plus whatever is
+        ticked, written through engine's own writer.
+
+        The testable core behind both the Export dialog and the end of a
+        Run. No Tk dialogs, no threads: one bad trace is logged and the rest
+        are still written.
+
+        `columns` defaults to the ticked providers of EXPORT > DATA FILES
+        and is otherwise a sequence drawn from EXPORT_COLUMN_ORDER.
+        `crop_nm` is (lo, hi) in nm and keeps only the rows inside the
+        range, in every column; it belongs to an export alone, so a Run
+        never passes one. `cd_names` defaults to the C/D tick: with it on
+        every name carries _C or _D, and the untagged twin of a file
+        rewritten under a new name is removed, so the folder holds one file
+        per point and Load previous run cannot read the same measurement
+        twice.
+
+        Returns {"paths": [...], "columns": [the extra headers],
+        "params": {...}}.
+        """
+        want = (self._column_ticks() if columns is None
+                else [k for k in EXPORT_COLUMN_ORDER if k in columns])
+        if cd_names is None:
+            cd_names = bool(self._products().get("cd_tagged"))
+        crop = None
+        if crop_nm and crop_nm[0] is not None and crop_nm[1] is not None:
+            crop = (min(float(crop_nm[0]), float(crop_nm[1])),
+                    max(float(crop_nm[0]), float(crop_nm[1])))
+        out = {"paths": [], "columns": [],
+               "params": {"columns": [], "column_params": {},
+                          "crop": (list(crop) if crop else None),
+                          "cd_names": bool(cd_names), "n": 0}}
+        if not results:
+            return out
+        os.makedirs(folder, exist_ok=True)
+        recipes = self._defringe_recipes() if "defringed" in want else {}
+        q = None
+        if "formula" in want:
+            q = self._quantity(self._qty_sel.get())
+            if q is None:
+                self._logline("  QTY  skipped: no formula is picked in "
+                              "Data > Formulas.")
+                want = [k for k in want if k != "formula"]
+        fhdr = self._formula_csv_header(q, want) if q is not None else None
+        headers, n_own = [], 0
+        taken, twins = set(), []
+        for r in results:
+            try:
+                wl = np.asarray(r["wl"], float)
+                extra, notch_abs = [], None
+                if "defringed" in want:
+                    # a Run's worker already cleaned these off the main
+                    # thread and hung them on the record; anything else
+                    # cleans here, at that trace's own recipe
+                    cols = r.get("notch_cols")
+                    if cols:
+                        rp = r.get("notch_recipe") or {}
+                    else:
+                        cols, rp = self._notch_columns_for(r, recipes)
+                    n_own += 1 if rp.get("source") != "global" else 0
+                    notch_abs = np.asarray(cols["Absorbance_notch"], float)
+                    for h in NOTCH_COLUMNS:
+                        extra.append((h, np.asarray(cols[h], float)))
+                if "smoothed" in want:
+                    extra.append((SMOOTH_COLUMNS[0], smoothing.smooth_curve(
+                        wl, np.asarray(r["absorbance"], float),
+                        self.smooth_params)))
+                    if notch_abs is not None:
+                        extra.append((SMOOTH_COLUMNS[1],
+                                      smoothing.smooth_curve(
+                                          wl, notch_abs, self.smooth_params)))
+                if q is not None:
+                    extra.append((fhdr, np.asarray(
+                        formulas.evaluate_quantity(
+                            q, self._formula_columns(r)), float)))
+                rec = dict(r)
+                if crop is not None:
+                    mask = (wl >= crop[0]) & (wl <= crop[1])
+                    for k in ("wl", "wn", "absorbance", "dark_c", "bg_c",
+                              "samp_c"):
+                        rec[k] = np.asarray(r[k], float)[mask]
+                    extra = [(h, np.asarray(v, float)[mask])
+                             for h, v in extra]
+                branch = self._branch_of(r) if cd_names else None
+                twin = self._abs_csv_name(r)
+                # two points that would land on ONE name keep both files:
+                # 12.500 and 12.501 both print "12.50", and the R19 branch
+                # writer already answered that with a -2, -3 ... on the
+                # value part rather than a silent overwrite
+                base_p, n = rec["pressure_str"], 1
+                while self._abs_csv_name(rec, branch) in taken:
+                    n += 1
+                    rec["pressure_str"] = "%s-%d" % (base_p, n)
+                taken.add(self._abs_csv_name(rec, branch))
+                p = engine.write_absorbance_csv(rec, folder,
+                                                extra=(extra or None),
+                                                branch=branch)
+                out["paths"].append(p)
+                if extra and not headers:
+                    headers = [h for h, _v in extra]
+                if branch and os.path.basename(p) != twin:
+                    twins.append(os.path.join(folder, twin))
+                self._logline("  CSV   %-30s -> %s"
+                              % (r["label"], os.path.basename(p)))
+            except Exception as e:
+                self._logline("  CSV   FAIL %s: %r" % (r["label"], e))
+        # the untagged twin of a file just rewritten under its branch
+        # letter, unless something else in this pass legitimately wrote it
+        keep = set(os.path.normcase(os.path.abspath(p))
+                   for p in out["paths"])
+        for t in twins:
+            if os.path.normcase(os.path.abspath(t)) in keep:
+                continue
+            try:
+                if os.path.isfile(t):
+                    os.remove(t)
+            except OSError as e:
+                self._logline("  CSV   could not remove %s: %r"
+                              % (os.path.basename(t), e))
+        cp = {}
+        if "defringed" in want:
+            cp["defringed"] = {
+                "n_own": n_own,
+                "notch_params": dict(
+                    self._notch_params(),
+                    per_trace=self._recipe_provenance(recipes))}
+        if "smoothed" in want:
+            cp["smoothed"] = {"smoothing": dict(self.smooth_params)}
+        if q is not None:
+            cp["formula"] = {"name": q["name"], "key": q["key"],
+                             "expr": q["expr"], "unit": q["unit"],
+                             "latex": q["latex"],
+                             "header": fhdr,
+                             "builtin": bool(q.get("builtin"))}
+        out["columns"] = list(headers)
+        out["params"]["columns"] = list(headers)
+        out["params"]["column_params"] = cp
+        out["params"]["n"] = len(out["paths"])
+        return out
+
+    def _write_run_csvs(self, results, dest):
+        """The end of a Run: the ticked columns, one summary line, and the
+        columns block in the reduction sidecar.
+
+        engine.run has already written the base CSV of every trace. With
+        nothing ticked beyond Absorbance there is nothing to add and the
+        files stay exactly as engine wrote them. Otherwise each one is
+        rewritten in place with its extra columns, and under its branch
+        name when the C/D row is ticked. Best effort throughout: a Run that
+        reduced a folder is never reported as failed because a column could
+        not be added."""
+        want = self._column_ticks()
+        cd = bool(self._products().get("cd_tagged"))
+        if not want and not cd:
+            self._logline("Run wrote %d CSV(s) -> %s." % (len(results), dest))
+            return None
+        res = self._write_final_csvs(results, dest, columns=want,
+                                     cd_names=cd)
+        cols = res["columns"]
+        self._logline("Run wrote %d CSV(s)%s -> %s. Export > Data files "
+                      "picks the columns."
+                      % (len(res["paths"]),
+                         (" with " + ", ".join(cols)) if cols else "", dest))
+        sidecar = os.path.join(dest, "_reduction.provenance.json")
+        try:
+            with open(sidecar, encoding="utf-8") as f:
+                payload = json.load(f)
+            payload["columns"] = res["params"]["columns"]
+            payload["column_params"] = res["params"]["column_params"]
+            engine.write_provenance(sidecar, payload)
+        except Exception as e:
+            self._logline("  ! provenance update failed: %r" % e)
+        return res
+
+    # ---- the Export dialog -----------------------------------------------
+    def _open_export_dialog(self, _e=None):
+        """EXPORT > DATA FILES, the left panel's 'Export...' and Ctrl+E all
+        open THIS window.
+
+        It writes the LOADED traces, not the shown ones, so a Run and this
+        button put the same set on disk: a trace hidden to tidy a figure is
+        not a trace you meant to leave out of your data. The five rows are
+        the section's own variables, so a tick here also sets what the next
+        Run writes and the note line says so. Crop is the one control that
+        belongs to the export alone."""
+        win = getattr(self, "_export_win", None)
+        try:
+            if win is not None and win.winfo_exists():
+                win.deiconify()
+                win.lift()
+                return win
+        except tk.TclError:
+            pass
+        win = tk.Toplevel(self.root)
+        self._export_win = win
+        win.title("Export data")
+        win.transient(self.root)
+        _w, _h = self._dialog_size(78, 66)
+        self._center_on_root(win, _w, _h)
+        self._apply_titlebar(win)
+        win.bind("<Escape>", lambda e: win.destroy())
+        win.grab_set()
+        # rule 14: the button bar claims its strip first, so shrinking the
+        # window squeezes the cards and never clips a button
+        bar = ttk.Frame(win, padding=(10, 8))
+        bar.pack(side="bottom", fill="x")
+        main = ttk.Frame(win, padding=(12, 10))
+        main.pack(side="top", fill="both", expand=True)
+
+        cols = self._card(main, grow="x")
+        cols.pack(fill="x", pady=PAD_ROW)
+        cols.set_title(self._lf_header(cols, "Columns"))
+        cb = cols.body
+        self._lbl(cb, text="Include in each trace's CSV:").pack(
+            anchor="w", pady=PAD_ROW)
+        self._export_checks = {}
+        for k in EXPORT_ROW_ORDER:
+            if k == "absorbance":
+                c = ttk.Checkbutton(cb, text=EXPORT_ROW_LABELS[k],
+                                    variable=self._abs_always,
+                                    state="disabled",
+                                    style="Muted.TCheckbutton")
+            else:
+                c = ttk.Checkbutton(cb, text=EXPORT_ROW_LABELS[k],
+                                    variable=self.export_products[k])
+            c.pack(anchor="w", pady=PAD_ROW)
+            Tooltip(c, EXPORT_ROW_TIPS[k])
+            self._export_checks[k] = c
+        crow = ttk.Frame(cb)
+        crow.pack(fill="x", pady=PAD_GROUP)
+        self._crop_check = ttk.Checkbutton(crow, text="Crop",
+                                           variable=self.crop_on)
+        self._crop_check.pack(side="left")
+        ttk.Entry(crow, textvariable=self.crop_min, width=7).pack(
+            side="left", padx=(PAD_X, 0))
+        ttk.Entry(crow, textvariable=self.crop_max, width=7).pack(
+            side="left", padx=(PAD_X, 0))
+        self._lbl(crow, text="nm").pack(side="left", padx=(PAD_X_TIGHT, 0))
+        Tooltip(self._crop_check, EXPORT_CROP_TIP)
+
+        dst = self._card(main, grow="x")
+        dst.pack(fill="x", pady=PAD_ROW)
+        dst.set_title(self._lf_header(dst, "Destination", icon="folder"))
+        drow = ttk.Frame(dst.body)
+        drow.pack(fill="x", pady=PAD_ROW)
+        self._export_dest = tk.StringVar(
+            value=(self.last_out_dir or self.out_var.get().strip()
+                   or self.in_var.get().strip() or ""))
+        self._export_browse_btn = ttk.Button(
+            drow, text="Browse", command=self._export_dialog_browse)
+        self._export_browse_btn.pack(side="right", padx=(PAD_X, 0))
+        self._export_dest_entry = ttk.Entry(drow,
+                                            textvariable=self._export_dest)
+        self._export_dest_entry.pack(side="left", fill="x", expand=True)
+        Tooltip(self._export_dest_entry,
+                "Where the CSVs go. It opens on the last Run's output "
+                "folder, then on the Output folder, then on the Input "
+                "folder.")
+
+        self._export_note = self._lbl(
+            main, text=(EXPORT_SYNC_NOTE if self.results
+                        else EXPORT_NO_DATA_NOTE),
+            foreground=(MUTED if self.results else WARN), justify="left")
+        self._export_note.pack(fill="x", anchor="w", pady=PAD_ROW)
+        self._export_status = self._lbl(main, text="", foreground=STATE,
+                                        justify="left")
+        self._export_status._status_pack = {"fill": "x", "anchor": "w",
+                                            "pady": PAD_TIGHT}
+
+        # The line ends with the folder's own name, so it must not run off
+        # the right edge: it fills its row and re-wraps at whatever width
+        # the row hands it, exactly as the section's own status line does
+        # (the builder above). A FIXED wraplength would leave a dead column
+        # of empty ground (Nhan, R14 A4).
+        def _wrap_export_status(e, w=self._export_status):
+            want = max(80, int(e.width) - 2)
+            try:
+                # str(): Tk 8.6.9 hands back a Tcl_Obj here
+                if int(str(w.cget("wraplength")) or 0) != want:
+                    w.configure(wraplength=want)
+            except (tk.TclError, ValueError):
+                pass
+
+        self._export_status.bind("<Configure>", _wrap_export_status)
+
+        self._export_close_btn = ttk.Button(bar, text="Close",
+                                            command=win.destroy)
+        self._export_close_btn.pack(side="right")
+        self._export_go_btn = self._brand_button(bar, "Export",
+                                                 self._export_dialog_write)
+        self._export_go_btn.pack(side="left")
+        self._export_open_btn = ttk.Button(bar, text="Open folder",
+                                           command=self._export_dialog_open)
+        self._export_open_btn.pack(side="left", padx=(PAD_X, 0))
+        if not self.results:
+            try:
+                self._export_go_btn.configure(state="disabled")
+            except tk.TclError:
+                pass
+        self._iconize_buttons(win)
+        # The two cards and the note ask for far less than the height the
+        # dialog idiom hands them, so the window came out with a band of
+        # empty ground under the note (Nhan, R20 H1: about 90 px of it,
+        # which was the reserve R20-C kept back for a status line that is
+        # not packed yet). The WIDTH stays the idiom's, because the
+        # requested width here is only the cards' natural width and the
+        # Destination entry is what stretches; the HEIGHT is whatever the
+        # packed children ask for, re-applied every time the status line
+        # comes or goes.
+        self._export_dialog_w = _w
+        win.resizable(True, False)
+        self._fit_export_dialog()
+        return win
+
+    def _fit_export_dialog(self):
+        """Give the Export dialog the HEIGHT its content asks for.
+
+        Called once when the window is built and again after every change
+        to its status line: _show_status packs that line only while it has
+        something to say, so the window has to grow when it appears and
+        hand the room back when it goes. The line re-wraps at whatever
+        width the row gives it, and re-wrapping changes the height it
+        asks for, so the measurement is repeated until it settles."""
+        win = getattr(self, "_export_win", None)
+        try:
+            if win is None or not win.winfo_exists():
+                return
+            try:
+                cap = int(self.root.winfo_screenheight() * 0.9)
+            except tk.TclError:
+                cap = 10 ** 5
+            # the width is the idiom's until the window is mapped, and
+            # the window's own after that, so a user's widening sticks
+            w = win.winfo_width()
+            if w <= 1:
+                w = int(getattr(self, "_export_dialog_w", 0) or 200)
+            st = getattr(self, "_export_status", None)
+            # winfo_height still reports the OLD height until the window
+            # manager has answered, so the last height asked for is what
+            # the loop compares against: one wm geometry call per change,
+            # never the same one twice (a repaint mid-resize is what a
+            # screenshot catches).
+            last = None
+            for _ in range(3):
+                win.update_idletasks()
+                # The status line re-wraps at the width its ROW gives it,
+                # and the re-wrap is what decides how tall it is. The
+                # <Configure> that normally does that only arrives after
+                # the resize, a round too late to measure against, so the
+                # same rule is applied here first (_wrap_export_status).
+                try:
+                    if st is not None and st.winfo_manager():
+                        lw = st.winfo_width()
+                        if lw <= 2:      # not laid out yet: the row is the
+                            lw = w - 24  # window less main's 12 px a side
+                        want = max(80, lw - 2)
+                        # str(): Tk 8.6.9 gives a Tcl_Obj here
+                        if int(str(st.cget("wraplength"))
+                               or 0) != want:
+                            st.configure(wraplength=want)
+                            win.update_idletasks()
+                except (tk.TclError, ValueError):
+                    pass
+                h = max(200, min(win.winfo_reqheight(), cap))
+                if h == last or abs(h - win.winfo_height()) <= 2:
+                    break
+                self._center_on_root(win, w, h)
+                last = h
+        except tk.TclError:
+            pass
+
+    def _export_say(self, text, role=None):
+        """The Export dialog's own status line, and the height it needs.
+
+        Every writer of that line goes through here, so the window can
+        never end up holding a row for a line that is not there (or
+        clipping one that is)."""
+        self._show_status(getattr(self, "_export_status", None), text, role)
+        self._fit_export_dialog()
+
+    def _export_dialog_browse(self):
+        """The Browse button: pick the destination folder."""
+        d = filedialog.askdirectory(
+            title="Folder for the data files",
+            initialdir=((self._export_dest.get() or "").strip() or None))
+        if d:
+            self._export_dest.set(d)
+
+    def _export_dialog_open(self):
+        """The Open folder button: the destination in Explorer."""
+        d = (self._export_dest.get() or "").strip()
+        if d and os.path.isdir(d):
+            self._open_path(d)
+        else:
+            self._export_say("That folder does not exist yet.", WARN)
+
+    def _export_dialog_write(self):
+        """The Export button: write, then report in the dialog, in the
+        section and in the log.
+
+        No messagebox: the answer belongs where the question was asked. Both
+        the dialog's own widgets are read through getattr, so the writer is
+        still callable when no window is standing."""
+        if not self.results:
+            self._export_say(EXPORT_NO_DATA_NOTE, WARN)
+            return None
+        dest = getattr(self, "_export_dest", None)
+        folder = (self._safe_get(dest, "") or "").strip()
+        if not folder:
+            self._export_say("Pick a destination folder.", WARN)
+            return None
+        on, lo, hi = self._crop_nm()
+        try:
+            res = self._write_final_csvs(self.results, folder,
+                                         crop_nm=((lo, hi) if on else None))
+        except OSError as e:
+            self._export_say("Writing failed: %s" % (e,), WARN)
+            self._show_status(self._data_status, "export failed", WARN)
+            self._logline("  ! data export failed: %r" % e)
+            return None
+        n = len(res["paths"])
+        cols = res["columns"]
+        with_cols = (" with " + ", ".join(cols)) if cols else ""
+        self._logline("Exported %d CSV(s) from %d trace(s)%s -> %s"
+                      % (n, len(self.results), with_cols, folder))
+        self._provenance(folder, "data_files", res["params"],
+                         files=res["paths"])
+        # the line carries the folder's own name; the full path is in the
+        # log line above, where a long path costs the panel nothing
+        line = ("%d trace%s -> %d CSV(s)%s -> %s"
+                % (len(self.results),
+                   "" if len(self.results) == 1 else "s", n, with_cols,
+                   os.path.basename(os.path.normpath(folder)) or folder))
+        self._export_say(line, STATE)
+        self._show_status(self._data_status, line, STATE)
+        return res
 
     def _copy_clipboard(self):
         """Copy the current figure to the system clipboard as an image."""

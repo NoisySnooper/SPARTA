@@ -7,6 +7,19 @@ spectra from diamond-anvil-cell experiments (developed for NSLS-II beamline
 
 ![SPARTA — the 3D shape surface of the bundled demo series, with the measured traces marked on the sheet](docs/screenshot.png)
 
+## Download (no Python needed)
+
+Most people want **SPARTA_v1.5.0_signed-runtime.zip** from the
+[Releases page](https://github.com/NoisySnooper/SQUISHE/releases/latest):
+unzip it anywhere and double-click `SPARTA.exe`. There is no installer, no
+administrator rights are needed, and nothing is written to the registry.
+Windows 10 / 11, 64-bit.
+
+**SPARTA_v1.5.0_win7.zip** is the same program on CPython 3.8.10, for offline
+Windows 7 SP1 x64 beamline machines that cannot be upgraded.
+
+The source route below (`python app.py`, or `run.bat`) stays for developers.
+
 ## What it does
 
 - Reads raw spectrometer segments, concatenates the grating segments of each
@@ -28,7 +41,7 @@ spectra from diamond-anvil-cell experiments (developed for NSLS-II beamline
   a filled 3D ridge view, and a continuous 3D shape surface — with camera
   presets, keyboard orbit, box-frame options, and per-axis stretch.
 
-## Highlights (v1.4)
+## Highlights
 
 - **Multi-tab sessions**: browser-style tabs, each with independent data,
   folders, settings, and undo history — compare loads side by side.
@@ -47,6 +60,112 @@ spectra from diamond-anvil-cell experiments (developed for NSLS-II beamline
   icon set, themed title bar and top banner, a named theme set (from clean
   Standard Light and true-black to Rainbow, Coast Guard, and more), and an
   adjustable interface text size.
+
+## New in v1.5.0
+
+- **One defringe pipeline**: the main plot, a Run's defringed columns, every
+  export and the thickness read all clean through the fringe workbench's own
+  routine, vendored from Matthew R. Diamond's `defringe_dac.py`. The old
+  automatic defringe module is removed, so no trace can fall through to a
+  second code path that disagrees with the workbench.
+- **Parity with the reference program**: the workbench notches at the measured
+  peak rather than a rounded value, so a trace opened in the workbench cleans
+  exactly as the main plot, the CSV columns and Matthew's own program do. His
+  session files open in SPARTA and SPARTA writes ones his program can open, the
+  batch notches file is merged instead of overwritten, and the pop-out window
+  is a full replica of his, bound to the same model.
+- **No fringe, no cleaning**: a channel with no detected fringe passes straight
+  through, with no notch, no low-pass and no red curve. The panel reads "no
+  fringe detected (p=...)" and shows raw and dark, with the noise floor and the
+  raw-minus-dark difference on the Sample channel, which is what the reference
+  program does. The main plot and the CSV columns leave that channel raw.
+- **The thickness read is corroborated**: the Thickness plot reads n·t with the
+  same detector the cleaning uses, where two of three detection windows must
+  agree.
+- **The low-pass cutoff line** drags inside its own FFT chart only, from 1 to
+  200 microns, and keeps the zoom on release; a pointer that left the chart
+  used to write the neighbouring chart's wavenumber into the cutoff. The region
+  the low-pass removes is tinted to the right of the line, and a cutoff box
+  left empty, set to 0 or given text means no low-pass, as in the reference
+  program.
+- **The workbench opens solved**: on the first open of a point the glyphs land
+  on the tallest peak of each chart, the solve runs, and n sample, t and d2 are
+  filled in. **n diamond** follows the point's pressure (Eremets model) with an
+  "Ambient n (2.4168)" reset; **View > Refractive index models** opens the model
+  reference; the results plot gains the Layer 2 overlays, an "As recorded"
+  toggle and per-panel EoS rows; the FFT panels carry a legend of the assigned
+  peaks and the 580, 640, 766 and 905 nm reference lines.
+- **Nothing fails silently**: a failure inside any control is written to the log
+  pane and to `sparta_errors.log` beside the program. The Defringe box repaints
+  the plot on every switch, so the fringe report can no longer run first and
+  strand the all-pressures plot on a channel with no detected fringe.
+- **One CSV per trace**: every ticked product is a column in that trace's own
+  absorbance CSV instead of a file of its own. Defringed data adds
+  Absorbance_notch, Background_notch and Sample_notch; Smoothed data adds
+  Absorbance_smoothed, and Absorbance_notch_smoothed as well while Defringed is
+  ticked; Formula values adds one column for the active formula. The reduction
+  sidecar records the columns written and the parameters behind them.
+- **The Export dialog**: EXPORT > DATA FILES, the new **Export...** button
+  between Run and Open output on the left panel, and **Ctrl+E** all open one
+  window with the same ticks, a Crop row, a destination box with Browse, and
+  Export / Open folder / Close. An export writes one `_export.provenance.json`
+  beside the CSVs, and the dialog and the section report the same result.
+- **C/D tag in file name** is a name rule now: ticked, every file carries `_C`
+  or `_D` and the untagged twin is removed, so a folder holds one file per
+  point; unticked, a name carries the letter only when the raw file name did.
+- **Crop is export-only**: it lives in the dialog, trims every column, and a Run
+  never applies it.
+- **Retired**: the standalone `*_absorbance_notch.csv`, the `cd_tagged`
+  subfolder, the "Save C/D-tagged CSVs..." button in Data > Traces, and
+  "Export CSV..." on the Export tab. Load previous run still ignores the old
+  notch file, so existing output folders reopen unchanged.
+- **The guide is one technical register**: the guide views, the in-app Guide
+  panel, the guided tour and QUICKSTART.pdf are rewritten to one plain style,
+  one idea per sentence, present tense, imperative instructions. Every control
+  name, default, range, unit, file name and formula is unchanged.
+- **Guide typography**: a line that reads as a sentence is set as prose and
+  hangs under its first line, while tables, file names and formulas stay
+  monospaced and aligned. Paragraph and line spacing are even, and whole
+  paragraphs that used to be frozen in the formula face are body text again.
+- **My notes** is what the Guide box opens on at a first launch, the last pick
+  still remembered, and **Data files** sits between Export and 3D Printing even
+  on a panel whose section order was saved before that section existed.
+- **Two ready-to-run downloads**: the signed-runtime package for Windows 10 and
+  11, and a Windows 7 SP1 x64 package on CPython 3.8.10 for offline beamline
+  machines. Both carry the same app, QUICKSTART.pdf and release notes, and
+  neither needs Python, an installer or administrator rights.
+- The test suite is now 780 tests.
+
+## New in v1.4.10
+
+- **Fringe peak fitting follows the reference routine**: dragging a band on
+  the FFT places it and solves in one action, the Gaussian refinement lands
+  on the measured peak instead of drifting off it, and the fit is drawn over
+  the data so you can see what was matched.
+- **Defringe uses each trace's own notches everywhere**: the bands you set in
+  the workbench are the ones applied to the on-screen trace, to Run, and to
+  every export, and a band you place by hand survives the significance gate
+  instead of being dropped by it. The old **Write to defringe** step is
+  retired — there is nothing left to copy across.
+- **Sessions remember the workbench**: per-point notch and glyph state is
+  saved with the session, points that carry saved work are marked in the
+  pressure list, and a new point starts from its neighbors instead of blank.
+- **New controls**: a low-pass **Edge shape** (Tanh, Erf or Hard) with a
+  roll-off width; a Fringe-tab toolbar; a calculated-n row; free-text
+  material names; a Y-axis dialog; a stem colormap chooser; a
+  **Fundamental** radio in the notch list; neighbor hints; live dragging of
+  the low-pass edge; **Reset** and drop point; and right-click, hover and
+  branch markers in the results window.
+- **More accurate results**: dispersion is averaged over the full detector
+  grid (the fine-tier n was off by up to 5%), error bars are computed from
+  the full-span signal, and data taken after November 2025 uses the correct
+  fine window.
+- **Faster**: the app opens about twice as fast, redraws and stepping through
+  pressure points no longer recompute work that has not changed, and a
+  rescan keeps the traces you had selected.
+- **Ctrl+Return** runs, **Escape** cancels, and **PageUp / PageDown** step
+  through pressure points. The tutorial is 71 steps.
+- The test suite is now 586 tests.
 
 ## New in v1.4.9
 
@@ -335,7 +454,7 @@ any unsigned exe): More info -> Run anyway.
 | `app.py` | GUI, plotting, all controls |
 | `engine.py` | parse / concatenate / absorbance / naming profiles / CSV + provenance |
 | `formulas.py` | the formula registry and its whitelist evaluator |
-| `defringe.py` | FFT-notch defringe (interference-fringe removal) |
+| `fringe_apply.py` | the one defringe entry point: clean a channel from a recipe, build the notch columns |
 | `fringe_*.py` | the vendored fringe core: optics, detection, notches, fits, stack, multiscale variance, materials + EOS |
 | `fringe_panel.py` | the Fringe workbench: FFT view, cards, solve, series |
 | `fringe_popout.py` | the pop-out replica of the original window |
@@ -353,6 +472,39 @@ any unsigned exe): More info -> Run anyway.
 
 ## Version history
 
+- **v1.5.0**: one defringe pipeline, vendored from Matthew R. Diamond's
+  program, for the main plot, a Run, every export and the thickness read,
+  with the old automatic defringe module removed; the workbench notches at
+  the measured peak so it agrees with the plot and the CSVs, a channel with
+  no detected fringe is left raw everywhere, and the Thickness plot reads
+  n·t with the corroborated detector; the low-pass cutoff line drags inside
+  its own chart only and the region it removes is tinted; a failure inside
+  any control is logged instead of silent; every ticked product is now a
+  column in that trace's own absorbance CSV, written by a Run or by the new
+  Export dialog (EXPORT > DATA FILES, the Export... button, Ctrl+E), with
+  C/D as a file-name rule and Crop as export-only; the standalone notch CSV,
+  the cd_tagged subfolder and "Export CSV..." are retired; the guide, Guide
+  panel, tour and QUICKSTART.pdf are rewritten to one technical register with
+  prose and verbatim text set apart; suite grown to 780 tests.
+- **v1.4.10** — fringe peak fitting reworked to the reference behavior (a
+  drag places the band and solves, the Gaussian refinement lands on the
+  measured peak, fit overlays drawn); defringe now applies each trace's own
+  workbench notches to the display, to Run and to every export, and
+  hand-placed bands survive the significance gate, so **Write to defringe**
+  is retired; sessions store per-point notch and glyph state, mark saved
+  points in the pressure list and seed a new point from its neighbors; new
+  controls — low-pass Edge shape (Tanh / Erf / Hard) with roll-off width, a
+  Fringe-tab toolbar, a calculated-n row, free-text material names, a Y-axis
+  dialog, a stem colormap chooser, a Fundamental radio in the notch list,
+  neighbor hints, live low-pass dragging, Reset and drop point, and
+  results-window right-click / hover / branch markers; accuracy fixes
+  (dispersion averaged over the full detector grid, where the fine-tier n
+  was off by up to 5%; error bars from the full-span signal; the correct
+  fine window for post-November-2025 data); about 2× faster startup, with
+  unchanged redraws and pressure-point steps no longer recomputed and trace
+  selections kept across a rescan; Ctrl+Return to run, Escape to cancel,
+  PageUp / PageDown to step points; tutorial grown to 71 steps; suite grown
+  to 586 tests.
 - **v1.4.9** — diamond fringe workbench (Fringe tab, Plot | Fringe centre
   switch, Detection gates, notch bands, Airy model stems, Solve for n and
   t, per-card [?] maths, and a pop-out replica of the original window with
@@ -428,7 +580,7 @@ any unsigned exe): More info -> Run anyway.
   vendored with his permission (MIT) and refactored pandas-free; the
   workbench follows his own routine:
   [github.com/matthewrdiamond/DAC-Absorption-Fringe-Analysis](https://github.com/matthewrdiamond/DAC-Absorption-Fringe-Analysis)
-- FFT-notch defringe (`defringe.py`) contributed by
+- The FFT-notch defringe method contributed by
   [Matthew Diamond](https://github.com/matthewrdiamond).
 - Developed in Dr. Kanani K. M. Lee's lab for NSLS-II beamline 22-IR-1.
 

@@ -73,9 +73,24 @@ TIPS = {
               "n(P) model.",
     "layer2": "Turn on for a second layer in the cell.",
     "layer2_cb": "Choose the material of the second layer.",
+    "medium_name": "What the medium is called on the rows and the "
+                   "schematic. Blank takes the dropdown's name.",
+    "sample_name": "What the sample is called on the rows and the "
+                   "schematic.",
+    "layer2_name": "What the second layer is called. Blank takes the "
+                   "dropdown's name.",
+    "reset_drop": "Put every input back to its shipped value and take this "
+                  "point off the results series.",
+    "dp": "The pressure the index models are read at. It fills in from the "
+          "loaded spectrum.",
+    "calc_n": "Read every modelled index at P, at the fringe window's "
+              "centre wavelength.",
+    "ambient_n": "Put the anvil on the ambient constant 2.4168.",
     "nd": "The anvil index at this spectrum's pressure. The solve holds it "
           "fixed.",
     "nmed": "The medium index. The solve holds it fixed.",
+    "nl2": "The second layer's index, read from its material on every "
+           "load. Shown only while Layer 2 is ticked.",
     "ns": "The sample index the model stems use. Fit peaks writes the "
           "solved value here.",
     "d2": "Thickness of the medium above the sample.",
@@ -100,19 +115,23 @@ TIPS = {
     "series_next": "Go to the next series folder.",
     "save": "Write the recorded points to series_continuity.json.",
     "load": "Read series_continuity.json back in.",
+    "load_file": "Open a saved session by name: a point snapshot or a "
+                 "series file.",
     "trace_cb": "Pick a pressure point in this series.",
     "trace_prev": "Go to the previous pressure point.",
     "trace_next": "Go to the next pressure point.",
     "lp_on": "Remove every ripple above the cutoff. This is the main "
              "cleaning tool.",
     "lp_um": "The cutoff for this channel, in micron of n*t.",
+    "lp_shape": "The shape of the low-pass edge: tanh, error function or "
+                "hard.",
+    "lp_roll": "The width the edge rolls off over, in micron of n*t.",
     "clear": "Take every notch off this channel.",
     "export_clean": "Write the cleaned spectrum to CSV.",
     "notch_list": "Open the notch list.",
     "write_notches": "Save notch_overrides.csv for the batch pipeline.",
     "delete_notches": "Delete this spectrum's rows from "
                       "notch_overrides.csv.",
-    "write_defringe": "Hand these notches and cutoffs to the whole series.",
     "fits": "Run the amplitude fitters on the current settings.",
     "history": "Reopen an earlier Compute fits run.",
     "tiers": "Switch the right panels between the flat view and the tiered "
@@ -466,10 +485,16 @@ class MatthewWindow(object):
         view.add_command(label="Results vs pressure", command=wb.results_view)
         view.add_separator()
         view.add_command(label="Info", command=wb._open_wb_info)
+        # his View > Refractive index models (15104)
+        view.add_command(label="Refractive index models...",
+                         command=wb._open_models)
         view.add_command(label="Guide", command=self._open_guide)
         # R14: the gates are a card in the main window's Fringe column,
         # so this scrolls that card into view rather than opening a window
         view.add_command(label="Detection card", command=wb._open_detection)
+        view.add_separator()
+        # his View > Y-axis range... (11806)
+        view.add_command(label="Y-axis range...", command=wb._open_yaxis)
         mbw = self._menubutton("Window")
         window = tk.Menu(mbw, tearoff=0)
         mbw.configure(menu=window)
@@ -480,8 +505,24 @@ class MatthewWindow(object):
         mbs = self._menubutton("Settings")
         setting = tk.Menu(mbs, tearoff=0)
         mbs.configure(menu=setting)
+        # The df master switch, the same BooleanVar the Fringe column's box
+        # and the Quick Access strip's box hold. A pop-out is a whole session
+        # away from either of them, and the red FFT filtered curve in here
+        # follows it.
+        df_var = getattr(self.app, "show_notch", None)
+        df_cmd = getattr(self.app, "_toggle_notch", None)
+        if df_var is not None and callable(df_cmd):
+            setting.add_checkbutton(label="Defringe (df)", variable=df_var,
+                                    command=df_cmd)
+            setting.add_separator()
         setting.add_checkbutton(label="Error bars (multiscale variance)",
                                 variable=wb.msv_v, command=wb._on_msv)
+        setting.add_separator()
+        # his Settings > Line colormap (11827-11833)
+        setting.add_command(label="Line colours...",
+                            command=wb._open_cmap_chooser)
+        setting.add_checkbutton(label="skip faint", variable=wb.skipfaint_v,
+                                command=wb._on_cmap)
         self._menus = [view, window, setting]
 
     def _open_guide(self):
@@ -500,7 +541,7 @@ class MatthewWindow(object):
         win.transient(a.root)
         a._center_on_root(win, *wb._dlg_size(60, 68))
         a._apply_titlebar(win)
-        win.bind("<Escape>", lambda e: win.destroy())
+        wb._closes_by_withdraw(win)
         setattr(wb, GUIDE_ATTR, win)
         card = a._card(win, grow="both")
         card.pack(fill="both", expand=True, padx=10, pady=8)
@@ -549,6 +590,9 @@ class MatthewWindow(object):
         self._card_intensity(col)
         self._card_panels(col)
         self._seal_slots()
+        # the n layer2 row is hidden until the box is ticked, and it has to
+        # come back in its OWN place: the workbench remembers where
+        self.wb._seal_l2_rows()
         self._build_plot(right)
         # a Panedwindow gives a weight=0 pane no width of its own until it
         # is mapped, so the sash is set once the window is realised, and
@@ -624,10 +668,16 @@ class MatthewWindow(object):
     def _lbl(self, parent, text, **kw):
         return self.app._lbl(parent, text=text, **kw)
 
-    def _spin(self, parent, var, lo, hi, width=8):
-        """A spinbox the fine-steps switch reaches (it walks wb._spins)."""
+    def _spin(self, parent, var, lo, hi, width=8, step=1.0):
+        """A spinbox the fine-steps switch reaches (it walks wb._spins).
+
+        `step` is the box's own coarse increment, the tab's grammar: a
+        thickness steps by a micron and an index by a tenth, and fine steps
+        divides whichever one the box carries by ten.
+        """
         sp = ttk.Spinbox(parent, textvariable=var, from_=lo, to=hi,
-                         width=width, increment=self.wb._step())
+                         width=width, increment=self.wb._step(step))
+        sp._fr_step = float(step)
         self.wb._spins = getattr(self.wb, "_spins", [])
         self.wb._spins.append(sp)
         self._spins.append(sp)
@@ -677,11 +727,20 @@ class MatthewWindow(object):
     # his sidebar, top to bottom
     # =====================================================================
     def _card_materials(self, parent):
-        """His Materials block: the stack's identities."""
+        """His Materials block: the stack's identities.
+
+        His header carries Reset & drop point (9514) and each dropdown a
+        free-text name beside it; both are here, in his places.
+        """
         a, wb = self.app, self.wb
         W = fringe_panel.STACK_LBL_W
         b = self._card(parent, "Materials")
         r = self._row(b)
+        rd = ttk.Button(r, text="Reset & drop point",
+                        command=wb._reset_and_drop_point)
+        rd.pack(side="right")
+        self._tip(rd, "reset_drop")
+        r = self._row(b, fringe_panel.PAD_TIGHT)
         self._lbl(r, "Anvil", width=W).pack(side="left")
         cb = a._mapped_combo(r, wb.diamond_v, fringe_panel.DIAMOND_LABELS,
                              width=18)
@@ -693,6 +752,9 @@ class MatthewWindow(object):
                              width=18)
         cb.pack(side="left", fill="x", expand=True)
         self._tip(cb, "medium")
+        e = ttk.Entry(r, textvariable=wb.name_med_v, width=12)
+        e.pack(side="left", padx=(fringe_panel.PAD_X, 0))
+        self._tip(e, "medium_name")
         r = self._row(b, fringe_panel.PAD_TIGHT)
         l2 = ttk.Checkbutton(r, text="Layer 2", variable=wb.layer2_on_v,
                              command=wb._on_layer2)
@@ -704,6 +766,14 @@ class MatthewWindow(object):
         cb.pack(side="left", padx=(fringe_panel.PAD_X, 0))
         self._tip(cb, "layer2_cb")
         self.tw["l2_cb"] = cb
+        e = ttk.Entry(r, textvariable=wb.name_l2_v, width=12)
+        e.pack(side="left", padx=(fringe_panel.PAD_X, 0))
+        self._tip(e, "layer2_name")
+        r = self._row(b, fringe_panel.PAD_TIGHT)
+        self._lbl(r, "Sample", width=W).pack(side="left")
+        e = ttk.Entry(r, textvariable=wb.name_samp_v, width=12)
+        e.pack(side="left", fill="x", expand=True)
+        self._tip(e, "sample_name")
 
     def _card_indices(self, parent):
         """His Refractive Indices & Thicknesses block, solved column too."""
@@ -721,9 +791,31 @@ class MatthewWindow(object):
                   foreground=fringe_panel.MUTED).pack(side="left",
                                                       padx=(PX, 0))
 
+        # his P -> n row, directly over the n diamond row (9591-9619)
+        r = self._row(b, PT)
+        self._lbl(r, "P:").pack(side="left")
+        dp = self._spin(r, wb.dp_v, 0.0, 500.0, width=6)
+        dp.configure(command=wb._calc_n)
+        dp.bind("<Return>", lambda e: wb._calc_n())
+        dp.bind("<FocusOut>", lambda e: wb._dp_blank_restore())
+        dp.pack(side="left", padx=(PX, 0))
+        self._lbl(r, "GPa").pack(side="left", padx=(3, 0))
+        self._tip(dp, "dp")
+        cn = ttk.Button(r, text="calc n", width=7, command=wb._calc_n)
+        cn.pack(side="left", padx=(12, 12))
+        self._tip(cn, "calc_n")
+        amb = ttk.Button(r, text="Ambient n (2.4168)", command=wb._ambient_n)
+        amb.pack(side="left")
+        self._tip(amb, "ambient_n")
+
+        # his n diamond is a BOX (9567): the model writes it on every load
+        IDX = fringe_panel.IDX_STEP
         r = self._row(b, PT)
         self._lbl(r, "n diamond", width=W).pack(side="left")
-        nd = self._lbl(r, "2.4168", width=10, font=a._F(0, mono=True))
+        nd = self._spin(r, wb.nd_v, 0.0, 100000.0, width=10, step=IDX)
+        nd.configure(command=wb._commit_stack)
+        for _seq in ("<Return>", "<FocusOut>"):
+            nd.bind(_seq, wb._commit_stack, add="+")
         nd.pack(side="left")
         self.tw["nd"] = nd
         self._lbl(r, "Fixed", font=a._F(-1, "bold"),
@@ -732,11 +824,16 @@ class MatthewWindow(object):
         self._tip(nd, "nd")
 
         r = self._row(b, PT)
-        self._lbl(r, "n medium", width=W).pack(side="left")
+        self.tw["lbl_n_medium"] = self._lbl(r, "n medium", width=W)
+        self.tw["lbl_n_medium"].pack(side="left")
         cell = ttk.Frame(r)
         cell.pack(side="left")
         nm = self._lbl(cell, "1.2", width=10, font=a._F(0, mono=True))
-        ne = ttk.Entry(cell, textvariable=wb.medium_n_v, width=10)
+        ne = self._spin(cell, wb.medium_n_v, 0.0, 100000.0, width=10,
+                        step=IDX)
+        ne.configure(command=wb._commit_stack)
+        for _seq in ("<Return>", "<FocusOut>"):
+            ne.bind(_seq, wb._commit_stack, add="+")
         self.tw["nmed_lbl"] = nm
         self.tw["nmed_e"] = ne
         self._lbl(r, "Fixed", font=a._F(-1, "bold"),
@@ -745,11 +842,30 @@ class MatthewWindow(object):
         self._tip(ne, "nmed")
         self._tip(nm, "nmed")
 
+        # his n layer2 row, hidden until Layer 2 is ticked (9578)
         r = self._row(b, PT)
-        self._lbl(r, "n sample", width=W).pack(side="left")
-        ns = ttk.Entry(r, textvariable=wb.ns_v, width=10)
+        self.tw["lbl_n_layer2"] = self._lbl(r, "n layer2", width=W)
+        self.tw["lbl_n_layer2"].pack(side="left")
+        nl2 = self._spin(r, wb.nl2_v, 0.0, 100000.0, width=10, step=IDX)
+        nl2.configure(command=wb._commit_stack)
+        for _seq in ("<Return>", "<FocusOut>"):
+            nl2.bind(_seq, wb._commit_stack, add="+")
+        nl2.pack(side="left")
+        self._lbl(r, "Fixed", font=a._F(-1, "bold"),
+                  foreground=fringe_panel.MUTED).pack(side="left",
+                                                      padx=(PX, 0))
+        self._tip(nl2, "nl2")
+        wb._l2_row(r, dict(fill="x", pady=PT))
+
+        r = self._row(b, PT)
+        self.tw["lbl_n_sample"] = self._lbl(r, "n sample", width=W)
+        self.tw["lbl_n_sample"].pack(side="left")
+        ns = self._spin(r, wb.ns_v, 0.0, 100000.0, width=10, step=IDX)
+        ns.configure(command=wb._commit_stack)
         ns.pack(side="left")
-        self._tip(ns, "ns")
+        for _seq in ("<Return>", "<FocusOut>"):
+            ns.bind(_seq, wb._commit_stack, add="+")
+        wb._tip_live(ns, lambda: wb._tip_with_hint(TIPS["ns"], "n_s"))
         self._sol_cell(r, "n_s", "n_s")
 
         # his short centred rule between the indices and the thicknesses
@@ -765,17 +881,21 @@ class MatthewWindow(object):
                 ("t", wb.t_v, "t sample (um)", "t_s", "t_s", "t"),
                 ("d1", wb.d1_v, "d1 lower medium (um)", "L", "L", "d1")):
             r = self._row(b, PT)
-            self._lbl(r, txt, width=W).pack(side="left")
-            sp = self._spin(r, var, 0.0, 300000.0, width=8)
+            self.tw["lbl_" + key] = self._lbl(r, txt, width=W)
+            self.tw["lbl_" + key].pack(side="left")
+            sp = self._spin(r, var, 0.0, fringe_panel.THICK_MAX_UM,
+                            width=8)
             sp.configure(command=lambda k=key: wb._on_d_edit(k))
             sp.bind("<Return>", lambda e, k=key: wb._on_d_edit(k))
             sp.pack(side="left")
-            self._tip(sp, tipk)
+            wb._tip_live(sp, lambda t=tipk, k=skey:
+                         wb._tip_with_hint(TIPS[t], k))
             self._sol_cell(r, sym, skey)
 
         r = self._row(b, fringe_panel.PAD_GROUP)
         self._lbl(r, "Total (um)", width=W).pack(side="left")
-        ts = ttk.Spinbox(r, textvariable=wb.total_v, from_=0.0, to=300000.0,
+        ts = ttk.Spinbox(r, textvariable=wb.total_v, from_=0.0,
+                         to=fringe_panel.THICK_MAX_UM,
                          width=8, increment=wb._step(),
                          command=wb._on_total_edit)
         ts.bind("<Return>", lambda e: wb._on_total_edit())
@@ -874,6 +994,12 @@ class MatthewWindow(object):
         ld.pack(side="left", fill="x", expand=True, padx=(PX, 0))
         self._tip(ld, "load")
 
+        r = self._row(b, fringe_panel.PAD_BTNROW)
+        lf = ttk.Button(r, text="Load session file...",
+                        command=wb.load_session_file)
+        lf.pack(side="left", fill="x", expand=True)
+        self._tip(lf, "load_file")
+
         st = self._lbl(b, "", font=a._F(0, mono=True))
         self.tw["state_lbl"] = self._slot(st, fill="x",
                                           pady=fringe_panel.PAD_TIGHT)
@@ -922,7 +1048,8 @@ class MatthewWindow(object):
                                  command=lambda c=chan:
                                  wb._on_lp_toggle(c))
             cb.pack(side="left")
-            sp = self._spin(r, wb.lp_v[chan], 1.0, 400.0, width=6)
+            sp = self._spin(r, wb.lp_v[chan], fringe_panel.LP_MIN_UM,
+                            fringe_panel.LP_MAX_UM, width=6)
             sp.configure(command=lambda c=chan: wb._on_lp_edit(c))
             sp.bind("<Return>", lambda e, c=chan: wb._on_lp_edit(c))
             sp.bind("<FocusOut>",
@@ -933,6 +1060,24 @@ class MatthewWindow(object):
             self._tip(cb, "lp_on")
             self._tip(sp, "lp_um")
             self._tip(clr, "clear")
+            # the edge that cutoff rolls off over (R15-D): the same two
+            # variables the tab's card writes, so the two views agree
+            r = self._row(b, PT)
+            self._lbl(r, "Edge", width=fringe_panel.LBL_W2).pack(side="left")
+            ecb = a._mapped_combo(r, wb.lp_shape_v[chan],
+                                  fringe_panel.LP_SHAPE_LABELS,
+                                  command=lambda c=chan:
+                                  wb._on_lp_edge_edit(c), width=13)
+            ecb.pack(side="left")
+            rsp = self._spin(r, wb.lp_roll_v[chan], 0.1, 40.0, width=5)
+            rsp.configure(command=lambda c=chan: wb._on_lp_edge_edit(c))
+            rsp.bind("<Return>", lambda e, c=chan: wb._on_lp_edge_edit(c))
+            rsp.bind("<FocusOut>", lambda e, c=chan: wb._on_lp_edge_edit(c))
+            rsp.pack(side="left", padx=(fringe_panel.PAD_X, 0))
+            self._lbl(r, "um").pack(side="left",
+                                    padx=fringe_panel.PAD_X_TIGHT)
+            self._tip(ecb, "lp_shape")
+            self._tip(rsp, "lp_roll")
         r = self._row(b, fringe_panel.PAD_GROUP)
         ec = ttk.Button(r, text="Export cleaned spectrum",
                         command=wb._export_cleaned)
@@ -951,11 +1096,9 @@ class MatthewWindow(object):
                         command=wb._delete_notches_file)
         dn.pack(side="left", fill="x", expand=True, padx=(PX, 0))
         self._tip(dn, "delete_notches")
-        r = self._row(b, PT)
-        wd = ttk.Button(r, text="Write to defringe", width=18,
-                        command=wb._write_to_defringe)
-        wd.pack(side="left")
-        self._tip(wd, "write_defringe")
+        # 'Write to defringe' retired with R15-B: the df switch and the
+        # defringed CSVs read each trace's own notch list live, so there is
+        # a button less to press here and in the tab.
         nf = self._lbl(b, "", foreground=fringe_panel.MUTED)
         self.tw["notch_file_lbl"] = self._slot(nf, fill="x", pady=PT)
 
@@ -1131,6 +1274,7 @@ class MatthewWindow(object):
         wb._cursor_now = self.cursor_now
         wb._request_redraw = self._defer_redraw
         self._pending = None
+        self._pending_keep = False
         try:
             yield
         finally:
@@ -1150,11 +1294,18 @@ class MatthewWindow(object):
                 pass
             self._in_view = False
             want, self._pending = self._pending, None
+            keep, self._pending_keep = bool(self._pending_keep), False
             if want is not None:
-                wb._request_redraw(now=want)
+                wb._request_redraw(now=want, keep_view=keep)
 
-    def _defer_redraw(self, now=False):
+    def _defer_redraw(self, now=False, keep_view=False):
+        """Take the request the workbench made inside the swap, keep_view and
+        all.  A low-pass drag in THIS window asks for a redraw that leaves the
+        panels' limits alone, and the flag has to survive the deferral or the
+        pop-out loses the reader's zoom where the tab keeps it."""
         self._pending = bool(now) or bool(self._pending)
+        if keep_view:
+            self._pending_keep = True
 
     def _mirror(self):
         """The workbench's `_mirror_popout` while this window is open.
@@ -1174,8 +1325,16 @@ class MatthewWindow(object):
         if sig != self._theme_seen:
             self._theme_seen = sig
             self._retheme()
+        # A view-preserving redraw (a low-pass drag and its release) must not
+        # move THIS window's panels either.  `_paint` clears all four axes,
+        # so the limits are taken inside the swap, where they are ours, and
+        # put back the moment the paint is done.
+        keep = bool(getattr(self.wb, "_keep_view", False))
         with self._view():
+            saved = self.wb._view_limits() if keep else None
             self._paint()
+            if saved is not None:
+                self.wb._restore_limits(saved)
         self._sync_soon()
 
     def _paint(self):
@@ -1209,8 +1368,16 @@ class MatthewWindow(object):
             wb.ax_s.set_axis_on()
             p = wb._stack_params(rec)
             upper = wb._x_upper(p)
-            wb._seed_roles(p, upper)
-            wb._artists = {"roles": {}, "lp": {}, "hover": {}}
+            # a cold start writes its solve into the boxes, so the stack
+            # model is rebuilt from them before anything is drawn -- the
+            # tab's `_redraw` does the same, and the two must agree
+            if wb._seed_roles(p, upper):
+                p = wb._stack_params(rec)
+                upper = wb._x_upper(p)
+            # the WHOLE registry, from the workbench's own definition: a
+            # window that reset a shorter set left the next gesture reaching
+            # for a key that was not there
+            wb._artists = wb._blank_artists()
             wb._nt_labels = {}
             wb._schem_labels = {}
             wb._hover_key = None
@@ -1273,12 +1440,18 @@ class MatthewWindow(object):
         except tk.TclError:
             return
         wb = self.wb
-        for key, src in (("nd", getattr(wb, "_nd_lbl", None)),
-                         ("nmed_lbl", getattr(wb, "_nmed_lbl", None)),
+        # n diamond is a spinbox on both sides now, sharing wb.nd_v, so
+        # there is nothing left to copy for it
+        for key, src in (("nmed_lbl", getattr(wb, "_nmed_lbl", None)),
                          ("series_lbl", getattr(wb, "_series_lbl", None))):
             self._copy(src, key)
         for skey in ("n_s", "t_s", "t_layer2", "L"):
             self._copy(getattr(wb, "_sol_lbl", {}).get(skey), "sol_" + skey)
+        # the material names reach the row labels, so this window's copies
+        # of those rows read whatever the tab's do (R15-D)
+        for nkey in ("n_medium", "n_sample", "n_layer2", "d2", "t", "d1"):
+            self._copy(getattr(wb, "_stack_lbls", {}).get(nkey),
+                       "lbl_" + nkey)
         for key, src in (("state_lbl", getattr(wb, "_state_lbl", None)),
                          ("series_disk_lbl",
                           getattr(wb, "_series_disk_lbl", None)),

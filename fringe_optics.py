@@ -6,6 +6,13 @@ Vendored from `defringe_dac.py` (DAC Absorption Fringe Analysis).
     Author        : Matthew R. Diamond
     Repository    : github.com/matthewrdiamond/DAC-Absorption-Fringe-Analysis
     License       : vendored under MIT by permission of the author.
+    Upstream snapshot: commit 7988300 (2026-08-03)
+
+Deliberate deviations from that snapshot, kept on purpose (hardening; every
+other difference is a bug): drift #4 per-window rejection instead of hot-path
+asserts, #8 point-count / finiteness gate on detection, #9 Fisher p-value
+overflow guard, #10 the 20-point floor extended to the full and wide tiers,
+#13 ValueError on a zero or negative notch half-width.
 
 Contents (source line refs are into defringe_dac.py):
     cauchy_n                     (:987)   Cauchy dispersion n(lam) = A + B/lam^2
@@ -32,8 +39,9 @@ wl[nm] are in nm; values stored, exported or displayed are in um.
 """
 
 import numpy as np
-from scipy.optimize import brentq
-from scipy.ndimage import median_filter
+# scipy.optimize and scipy.ndimage are imported inside the two functions
+# that use them: importing this module costs a second of scipy otherwise,
+# and most sessions never reach an equation of state or a Hampel pass.
 from scipy.special import erfinv
 
 from fringe_config import DEFAULT_CONFIG
@@ -90,6 +98,8 @@ def vinet_density(P_gpa, K0=DIAMOND_K0, K0p=DIAMOND_K0P, rho0=DIAMOND_RHO0):
         return rho0
     eta = 1.5 * (K0p - 1.0)
 
+    from scipy.optimize import brentq
+
     def _vinet_residual(x):
         return 3.0 * K0 * x ** (-2) * (1.0 - x) * np.exp(eta * (1.0 - x)) - P_gpa
 
@@ -101,6 +111,8 @@ def bm3_v_ratio(P_gpa, K0, K0p):
     """V/V0 at pressure P via the 3rd-order Birch-Murnaghan EOS."""
     if P_gpa <= 0:
         return 1.0
+
+    from scipy.optimize import brentq
 
     def _bm3(x):   # x = V0/V
         f = 0.5 * (x ** (2.0 / 3.0) - 1.0)
@@ -274,6 +286,8 @@ def local_noise_floor(data, window=7, n_sigma=3.0):
     if window < 1:
         raise ValueError("local_noise_floor: window must be >= 1 (got %r)" % (window,))
     data = np.asarray(data, float)
+    from scipy.ndimage import median_filter
+
     med = median_filter(data, size=window)
     mad = median_filter(np.abs(data - med), size=window)
     return n_sigma * MAD_TO_SIGMA * mad

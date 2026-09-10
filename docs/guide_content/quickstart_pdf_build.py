@@ -7,15 +7,16 @@ figures already use.
 
 Layout rules (they mirror the on-screen guide's own contract):
   - a line at column 0 that is ALL CAPS and starts with a letter is a heading
-  - a line indented six spaces or more has meaningful horizontal alignment
-    and is set in a monospaced face; everything else is set in Arial
+  - a line indented six spaces or more is set in a monospaced face only when
+    it is a table row or a verbatim shape (see mono_line_flags); a wrapped
+    continuation at that indent is prose and sets in Arial like its item
   - HTML comments are editorial and never reach the page
   - source lines are already wrapped at or under 72 characters, so one
     source line is one printed line
 
 Usage:
     python docs/guide_content/quickstart_pdf_build.py
-    python docs/guide_content/quickstart_pdf_build.py --version v1.4.9
+    python docs/guide_content/quickstart_pdf_build.py --version v1.4.10
     python docs/guide_content/quickstart_pdf_build.py --out somewhere.pdf
 
 NQT / Lee Lab -- Aug 2026
@@ -109,7 +110,7 @@ MONO_FILES = {"50_shortcuts.md"}
 COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
 
 
-def app_version(default="v1.4.9"):
+def app_version(default="v1.4.10"):
     """APP_VERSION out of app.py, so the cover cannot drift from the build."""
     path = os.path.join(ROOT, "app.py")
     try:
@@ -123,19 +124,66 @@ def app_version(default="v1.4.9"):
     return default
 
 
-def _is_aligned(stripped, prev_kind):
-    """True when a deeply indented line's horizontal alignment is meaningful.
+VERBATIM_CHARS = set("=/\\<>{}[]")
+LOWER_WORD_RE = re.compile(r"[a-z]{3,}\Z")
+DIGIT_RE = re.compile(r"\d")
 
-    A six-space indent alone is ambiguous: it marks both a code / column
-    block AND the second line of a wrapped four-space bullet. Three signals
-    separate them - the line opens a block (the previous line was blank or a
-    heading), it continues one (the previous line was already aligned), or it
-    contains an internal column gap of two or more spaces. A wrapped
-    continuation matches none of the three.
+
+def _three_lower_words(stripped):
+    """True when three plain lowercase words run together: that is prose."""
+    run = 0
+    for word in stripped.split():
+        if LOWER_WORD_RE.match(word):
+            run += 1
+            if run >= 3:
+                return True
+        else:
+            run = 0
+    return False
+
+
+def _is_verbatim(stripped):
+    """True for a formula, a path, a file name or another literal shape."""
+    for token in stripped.split():
+        if (any(c in VERBATIM_CHARS for c in token)
+                or len(DIGIT_RE.findall(token)) >= 2):
+            return not _three_lower_words(stripped)
+    return False
+
+
+def mono_line_flags(lines):
+    """{index: True} for the deeply indented lines that set monospaced.
+
+    The panel's own rule, mirrored so the PDF and the Guide box break the
+    same way. A line indented six spaces or more is aligned material only
+    when it is a table row - three or more internal spaces, or two or more
+    with a mono sibling at the same indent - or a verbatim shape: a token
+    carrying one of = -> / \\ < > { } [ ] or two digits, in a line that is
+    not three consecutive lowercase words of prose. Everything else at that
+    indent is the wrapped continuation of the item above it, and it sets in
+    the body face like the rest of that item.
     """
-    if prev_kind in ("s", "h", "m"):
-        return True
-    return "  " in stripped
+    flags = {}
+    for i, raw in enumerate(lines):
+        line = raw.rstrip()
+        stripped = line.strip()
+        if not stripped or len(line) - len(line.lstrip(" ")) < 6:
+            continue
+        flags[i] = (re.search(r"\S {3,}\S", line) is not None
+                    or _is_verbatim(stripped))
+    for i in sorted(flags):
+        if flags[i]:
+            continue
+        line = lines[i].rstrip()
+        if re.search(r"\S {2,}\S", line) is None:
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        for j in (i - 1, i + 1):
+            sib = lines[j].rstrip() if 0 <= j < len(lines) else ""
+            if flags.get(j) and len(sib) - len(sib.lstrip(" ")) == indent:
+                flags[i] = True
+                break
+    return flags
 
 
 def load_blocks(path, mono_all=False):
@@ -151,12 +199,11 @@ def load_blocks(path, mono_all=False):
     if lines:
         lines = lines[1:]                     # the title line
     blocks = []
-    prev = "s"                                # kind of the previous line
-    for raw in lines:
+    mono = mono_line_flags(lines)
+    for idx, raw in enumerate(lines):
         line = raw.rstrip()
         if not line.strip():
             blocks.append(("s", ""))
-            prev = "s"
             continue
         indent = len(line) - len(line.lstrip(" "))
         stripped = line.strip()
@@ -167,13 +214,10 @@ def load_blocks(path, mono_all=False):
         if (indent == 0 and any(c.isalpha() for c in stripped)
                 and stripped == stripped.upper()):
             blocks.append(("h", stripped))
-            prev = "h"
-        elif mono_all or (indent >= 6 and _is_aligned(stripped, prev)):
+        elif mono_all or mono.get(idx):
             blocks.append(("m", line))
-            prev = "m"
         else:
             blocks.append(("b", line))
-            prev = "b"
     # a heading may not be the last thing on a page with nothing under it,
     # and trailing blanks only waste paper
     while blocks and blocks[-1][0] == "s":
@@ -288,11 +332,14 @@ def draw_cover(pdf, version):
     y += 0.42
     put(fig, M_L, y, "Quick start guide", 22, SANS, weight="semibold")
     y += 0.44
+    # The cover is printed guide prose, so PLAN_R19 section 3 governs it:
+    # the agent noun is SPARTA ("the tool" retires, rule 2) and the filler
+    # goes (rule 4).
     put(fig, M_L, y,
-        "Getting data in, teaching the tool your file names,", 11, SANS)
+        "Getting data in, teaching SPARTA your file names,", 11, SANS)
     y += 0.20
     put(fig, M_L, y,
-        "and the recipes for the outputs you actually need.", 11, SANS)
+        "and the recipes for the outputs you need.", 11, SANS)
 
     put(fig, M_L, PAGE_H - 1.55, version, 13, SANS, weight="bold",
         color=ACCENT)

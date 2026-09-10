@@ -23,8 +23,13 @@ NQT / Lee Lab -- Jun 2026
 """
 
 import numpy as np
-from scipy.signal import savgol_filter
-from scipy.ndimage import median_filter
+
+# SciPy is imported inside the two functions that need it (_hampel and
+# _sg_chunks). Importing it at module level cost ~0.8 s of the program's
+# ~1.4 s cold start, and none of it is needed to put a window on screen:
+# smoothing runs only when a trace is actually smoothed. The import is
+# cached by Python after the first call, so the cost lands once, on the
+# first smoothed trace, instead of on every launch.
 
 # Steps 1-3, 5 verbatim from Igor DACSmooth_InitParams(); SG windows
 # retuned for the 22-IR-1 spectrometer (see module docstring)
@@ -67,6 +72,7 @@ def _density(y, win, min_pts):
 
 def _hampel(y, win, sigma):
     """Median/MAD despike. NaNs are bridged for the median, then restored."""
+    from scipy.ndimage import median_filter
     if win % 2 == 0:
         win += 1
     finite = np.isfinite(y)
@@ -85,6 +91,7 @@ def _hampel(y, win, sigma):
 
 def _sg_chunks(y, x_nm, split, lwin, lpoly, rwin, rpoly):
     """Savitzky-Golay each contiguous finite run; params chosen by chunk midpoint."""
+    from scipy.signal import savgol_filter
     finite = np.isfinite(y)
     if not finite.any():
         return

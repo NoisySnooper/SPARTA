@@ -118,6 +118,71 @@ def test_config_lamp_regime_is_explicit():
         c.for_lamp_regime('whenever')
 
 
+# --- D2: acquisition date -> lamp regime -> fine window --------------------
+# Drift #3 in the core drift report: the source picks the fine window from a
+# parsed acquisition date in its batch pipeline and never in its GUI.  These
+# helpers are the pure half of the SPARTA wiring; the panel-side call is
+# Wave C's.
+
+@pytest.mark.parametrize('name,want', [
+    ('Y03_ch29_Nov2025_ProcessedCSV', (2025, 11)),
+    ('Chewy_ch29_Jun2025', (2025, 6)),
+    ('Boba_Alm100_Jan2026_ProcessedCSV', (2026, 1)),
+    ('Vis_Y04_Arch29_May2025_Absorbance', (2025, 5)),
+    ('Y04_Arch29_2025-11_absorbance', (2025, 11)),
+    ('run_2025_07_series', (2025, 7)),
+    ('set.2024.12.raw', (2024, 12)),
+    ('Boba_Alm100_November 2025_CSV', (2025, 11)),
+    ('Y03_ch29_Sept2025', (2025, 9)),
+    ('Y03_ch29_ProcessedCSV', None),
+    ('Decadent_ch29_run', None),          # a month prefix inside a word
+    ('', None),
+    (None, None),
+])
+def test_parse_folder_date(name, want):
+    assert FC.parse_folder_date(name) == want
+
+
+def test_lamp_regime_cutover_is_november_2025():
+    assert FC.FINE_CUTOVER_YEAR_MONTH == (2025, 11)
+    assert FC.lamp_regime_for_date(None) == 'pre_nov2025'
+    assert FC.lamp_regime_for_date((2025, 10)) == 'pre_nov2025'
+    assert FC.lamp_regime_for_date((2025, 11)) == 'nov2025_plus'
+    assert FC.lamp_regime_for_date((2026, 1)) == 'nov2025_plus'
+    assert FC.lamp_regime_for_date((2025, 11, 4)) == 'nov2025_plus'
+    assert FC.fine_center_for_date((2025, 11)) == 11200.0
+    assert FC.fine_center_for_date((2025, 6)) == 13500.0
+
+
+def test_fine_window_for_date_matches_the_source_bands():
+    lo, hi = FC.fine_window_for_date((2025, 6))
+    assert lo == pytest.approx(12500.0e-7) and hi == pytest.approx(14500.0e-7)
+    lo, hi = FC.fine_window_for_date((2025, 11))
+    assert lo == pytest.approx(10200.0e-7) and hi == pytest.approx(12200.0e-7)
+    assert FC.fine_window_for_date(None) == FC.fine_window_for_date((2025, 6))
+
+
+def test_config_for_date_and_folder_preserve_other_fields():
+    base = FC.DEFAULT_CONFIG.evolve(notch_halfwidth_um=2.25)
+    c = FC.config_for_date((2025, 11), cfg=base)
+    assert c.fine_center_cm == 11200.0 and c.notch_halfwidth_um == 2.25
+    assert base.fine_center_cm == 13500.0          # frozen: untouched
+    assert FC.config_for_folder('Y03_ch29_Nov2025_ProcessedCSV',
+                                cfg=base).fine_center_cm == 11200.0
+    assert FC.config_for_folder('Y03_ch29_Jun2025_ProcessedCSV',
+                                cfg=base).fine_center_cm == 13500.0
+    # No date in the name -> the config is handed back unchanged.
+    assert FC.config_for_folder('Y03_ch29', cfg=base) is base
+
+
+def test_year_month_validation():
+    assert FC.normalise_year_month((2025, 11, 4)) == (2025, 11)
+    assert FC.normalise_year_month(None) is None
+    for bad in ((2025, 13), (2025, 0), (2025,), 2025):
+        with pytest.raises(ValueError):
+            FC.normalise_year_month(bad)
+
+
 @pytest.mark.parametrize('kw', [
     dict(diamond_model='sapphire'),
     dict(fit_wl_min_nm=900.0, fit_wl_max_nm=800.0),
@@ -332,6 +397,9 @@ def test_notch_rejects_zero_halfwidth(grid):
 def test_width_sweep_shapes_and_monotone_removal(grid):
     wl, raw, wn_u, sig_u = grid
     sw = FN.notch_width_sweep(wn_u, sig_u, 24000.0, wl=wl, raw=raw)
+    # 'width_fracs' is the upstream sweep's own key for the swept values
+    # (absolute um here, factors in cascade mode). It is not the retired
+    # fractional notch convention, which no longer exists anywhere.
     assert sw['residual_power'].shape == sw['width_fracs'].shape
     assert sw['I_clean_wl'].shape == (sw['width_fracs'].size, wl.size)
     assert sw['residual_power'][-1] <= sw['residual_power'][0] * 1.001
@@ -545,6 +613,10 @@ def test_compute_channel_fit_runs_fits():
     assert 'full' in fit['models']['constant_n']
     rd = fit['models']['constant_n']['full']
     assert rd['nt_um'] == pytest.approx(24.0, rel=0.1)
+    # Drift #7 restore: constant_n reports the FITTED n*t, and t = nt/n comes
+    # out unclamped (it no longer passes through dispersion_n's T_BOUNDS clip).
+    assert rd['nt_um'] == pytest.approx(rd['nt_nm'] * 1e-3, rel=1e-12)
+    assert rd['n_mean'] * rd['t_um'] == pytest.approx(rd['nt_um'], rel=1e-9)
     assert 'notch_sweep' in fit['fft_info']
 
 
@@ -701,6 +773,8 @@ def test_run_window_fits_tiers_and_narrow_gating():
     norm_u = sig_u / np.maximum(trend, 0.01 * trend.max()) - 1.0
     fi = dict(nt_est=24000.0, peak_amp=0.08, peak_phase=0.0)
 
+    # wl_full omitted here on purpose: this exercises the documented fallback
+    # (1/wn_u_full) for callers that work purely in wavenumber space.
     # pre-Nov-2025 lamp: fine centre 13500 cm^-1 (740 nm) sits inside 600-800 nm
     pre = FF.run_window_fits(fi, norm_u, wn_u, cfg=cfg)
     assert 'narrow' not in pre['constant_n']
@@ -710,6 +784,99 @@ def test_run_window_fits_tiers_and_narrow_gating():
     post = FF.run_window_fits(fi, norm_u, wn_u,
                               cfg=cfg.for_lamp_regime('nov2025_plus'))
     assert 'narrow' in post['constant_n']
+
+
+def _tier_inputs(n_pts=1600):
+    wl, raw = make_spectrum(nts_nm=(24000.0,), amps=(0.08,), n_pts=n_pts)
+    wn_u, sig_u = uniform_grid(wl, raw)
+    trend = np.polyval(np.polyfit(wn_u, sig_u, 4), wn_u)
+    norm_u = sig_u / np.maximum(trend, 0.01 * trend.max()) - 1.0
+    return wl, wn_u, norm_u, dict(nt_est=24000.0, peak_amp=0.08, peak_phase=0.0)
+
+
+def test_run_window_fits_averages_n_over_the_full_wavelength_grid():
+    """Drift #1: every tier's n_mean averages n(lam) over the FULL original
+    detector grid (the source's `wl`), not over the tier's slice of the uniform
+    wavenumber resample."""
+    cfg = FC.DEFAULT_CONFIG.evolve(msv_models=('cauchy', 'linear_n'))
+    wl, wn_u, norm_u, fi = _tier_inputs()
+    out = FF.run_window_fits(fi, norm_u, wn_u, cfg=cfg, wl_full=wl)
+    seen = 0
+    for wname, rd in out['cauchy'].items():
+        n_full = float(np.mean(rd['A'] + rd['B'] / wl ** 2))
+        assert rd['n_mean'] == pytest.approx(n_full, rel=1e-12), wname
+        assert rd['nt_um'] == pytest.approx(rd['n_mean'] * rd['t_um'], rel=1e-12)
+        seen += 1
+    for wname, rd in out['linear_n'].items():
+        n_full = float(np.mean(rd['n0'] + rd['n1'] / wl))
+        assert rd['n_mean'] == pytest.approx(n_full, rel=1e-12), wname
+        seen += 1
+    assert seen, 'no dispersive tiers were produced'
+
+
+def test_run_window_fits_constant_n_shares_one_wl_ref():
+    """Drift #5 / #6: the constant_n Fresnel inversion uses one
+    wl_ref = mean(1/wn_u_full) for full/wide/narrow (fine keeps its own), and V
+    reaches it unclamped."""
+    cfg = FC.DEFAULT_CONFIG.evolve(msv_models=('constant_n',)) \
+                           .for_lamp_regime('nov2025_plus')
+    wl, wn_u, norm_u, fi = _tier_inputs()
+    out = FF.run_window_fits(fi, norm_u, wn_u, cfg=cfg, wl_full=wl)
+    fine_mask = (wn_u >= cfg.fine_wn_lo) & (wn_u <= cfg.fine_wn_hi)
+    wl_ref_shared = float(np.mean(1.0 / wn_u))
+    wl_ref_fine = float(np.mean(1.0 / wn_u[fine_mask]))
+    assert out['constant_n'], 'no constant_n tiers were produced'
+    for wname, rd in out['constant_n'].items():
+        ref = wl_ref_fine if wname == 'fine' else wl_ref_shared
+        n_ref = float(FO.fresnel_n_from_V(rd['V'], ref, cfg=cfg))
+        assert rd['n_mean'] == pytest.approx(n_ref, rel=1e-12), wname
+        # drift #7: t is nt/n, straight out, and nt_um is the fitted n*t
+        assert rd['t_um'] * 1000.0 == pytest.approx(
+            rd['nt_nm'] / max(n_ref, 1e-6), rel=1e-12), wname
+        assert rd['nt_um'] == pytest.approx(rd['nt_nm'] * 1e-3, rel=1e-12), wname
+
+
+def test_constant_n_result_dict_skips_the_t_bounds_clip():
+    """Drift #7: the source's t_cnt = nt/max(n,1e-6) is NOT clipped to
+    T_BOUNDS_NM; `dispersion_result_dict` (which is his `_dispersion_result_dict`
+    verbatim, clip included) is deliberately bypassed on this path."""
+    params = [1.5, 500000.0, 0.2]            # t = 500 um, well past t_max_nm
+    rd = FF._constant_n_result_dict(params, dict(nt_nm=750000.0))
+    assert rd['t_um'] == pytest.approx(500.0)
+    assert rd['nt_um'] == pytest.approx(750.0)
+    assert rd['n_mean'] == 1.5 and rd['n_const'] == 1.5
+    clipped = FF.dispersion_result_dict(params, np.array([700.0]), 'constant_n')
+    assert clipped['t_um'] == pytest.approx(200.0)   # the clip we now bypass
+
+
+def test_v_clamp_applies_to_band_integral_only():
+    """Drift #6: the extra min(V, 0.9999) is gone from the constant_n path and
+    kept on band_integral, matching the source's own two call sites
+    (:16250-16262 vs the band-integral extract :2311)."""
+    cfg = FC.DEFAULT_CONFIG
+    wl_ref, V = 700.0, 1.2
+    fit_result = (24000.0, V, 0.0, None)
+    p_cn, model, extra = FF._params_from_fit('constant_n', fit_result, wl_ref, cfg)
+    p_bi, _m, _e = FF._params_from_fit('band_integral', fit_result, wl_ref, cfg)
+    assert model == 'constant_n' and extra['V'] == V
+    assert p_cn[0] == pytest.approx(FO.fresnel_n_from_V(V, wl_ref, cfg=cfg))
+    assert p_bi[0] == pytest.approx(
+        FO.fresnel_n_from_V(min(V, 0.9999), wl_ref, cfg=cfg))
+    assert p_cn[0] != p_bi[0]
+
+
+def test_averaging_grid_falls_back_on_an_unusable_full_grid():
+    """The documented fallback: a missing or non-finite `wl_full` reverts to
+    1/wn_u_full instead of poisoning every n_mean with NaN."""
+    wn_u = np.linspace(1.0 / 1050.0, 1.0 / 380.0, 64)
+    msgs = []
+    base = FF._averaging_wl_grid(None, wn_u, msgs.append, 'CH')
+    assert np.allclose(base, 1.0 / wn_u) and not msgs
+    bad = FF._averaging_wl_grid(np.array([700.0, np.nan]), wn_u, msgs.append, 'CH')
+    assert np.allclose(bad, 1.0 / wn_u) and msgs
+    good = np.linspace(400.0, 1000.0, 10)
+    assert np.array_equal(FF._averaging_wl_grid(good, wn_u, msgs.append, 'CH'),
+                          good)
 
 
 def test_run_window_fits_rejects_non_lsq_method():
@@ -1010,7 +1177,7 @@ def test_core_modules_are_python38_parseable():
     import ast
     mods = ['fringe_config', 'fringe_optics', 'fringe_notch', 'fringe_detect',
             'fringe_fit', 'fringe_stack', 'fringe_msv', 'fringe_materials',
-            'defringe']
+            'fringe_apply']
     for m in mods:
         path = os.path.join(ROOT, m + '.py')
         with open(path, 'r', encoding='utf-8') as fh:
@@ -1028,6 +1195,10 @@ def test_core_modules_carry_the_attribution_header():
         assert 'Matthew R. Diamond' in head, m
         assert 'github.com/matthewrdiamond/DAC-Absorption-Fringe-Analysis' in head, m
         assert 'vendored under MIT by permission of the author' in head, m
+        # Provenance: which upstream revision the port was cut from, and the
+        # hardening we knowingly keep on top of it.
+        assert 'Upstream snapshot: commit 7988300 (2026-08-03)' in head, m
+        assert 'Deliberate deviations from that snapshot' in head, m
         low = head.lower()
         for banned in ('claude', 'anthropic', 'ai-generated', 'copilot'):
             assert banned not in low, '%s mentions %r' % (m, banned)

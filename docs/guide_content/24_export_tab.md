@@ -1,33 +1,28 @@
 EXPORT TAB
 
-This tab gets the figure and the numbers out. It sizes them for a
-journal. It records how the tool made them.
+The Export tab writes figures, data files and printable solids, and
+records the settings behind each file.
 
 
 EXPORT > PRESETS & PROJECTS
 
-  A preset saves the whole control state under a name. Pick it in the
-    dropdown and click Load. 'Save as...' names a new one. Delete
-    removes it. A preset stores styling only.
+  A preset saves the whole control state under a name. Pick it in
+    the dropdown and click Load. 'Save as...' names a new one, and
+    Delete removes it. A preset stores styling only.
 
-  A project stores the same state plus the input and output folders.
-    It is a .json you can reopen exactly where you left off. Use
-    'Save project...' and 'Open project...'.
+  A project stores the same state plus the input and output folders,
+    in a .json file. Use 'Save project...' and 'Open project...' to
+    put an analysis back on screen.
 
-  Use a preset for a house style you apply to many datasets. Use a
-    project to put one analysis back on screen months later.
-
-  'Reset all' on the control bar at the top of the panel resets every
-    plot control. It asks first. It keeps your loaded data and
-    folders.
+  'Reset all' on the control bar at the top of the panel resets
+    every plot control. It asks first, and it keeps the loaded data
+    and the folders.
 
 
 EXPORT > FIGURE
 
-  Journal preset: sets a publisher's current column width and its
-    whole house style in one pick. The style covers the typeface and
-    the title, label and tick sizes. It also covers line weight, grid
-    off, thin spines, ticks in, minor ticks on, and DPI.
+  Journal preset: sets a publisher's column width and house style:
+    typeface, text sizes, line weight, spines, ticks and DPI.
 
       Nature single / double        89 mm / 183 mm, Arial
       Science 1 / 2 / 3-col         5.7 / 12.1 / 18.4 cm, Arial
@@ -37,220 +32,243 @@ EXPORT > FIGURE
       Nature 3D single / double     as above, plus the 3D scene
       Science 3D 2-col              as above, plus the 3D scene
       APS 3D 2-col                  as above, plus the 3D scene
-      Clean style                   grid off, thin spines - the
-                                    font-agnostic tidy-up; leaves
-                                    your size and fonts alone
+      Clean style                   grid off, thin spines
       Square (5 in), Wide (10x4 in) size only
 
-    The presets marked 3D also style the whole 3D scene the way those
-    journals print it. That style uses the minimal 3-axes frame,
-    with the background panes and the grid off. It uses a colorbar
-    in place of a many-entry legend, and a standard camera.
+    Clean style keeps your own size and fonts. The 3D presets also
+    style the scene: minimal 3-axes frame,
+    panes and grid off, a colorbar instead of a legend, and a
+    standard camera.
 
-  Set as default: remembers the preset and applies it at every
-    launch. Every session then opens sized for the journal you
-    publish in. The star marks the preset that is saved.
+  Set as default: applies the preset at every launch. The star marks
+    the saved preset.
 
   W x H in plus Apply: a custom figure size. Type in either box and
-    press Return to apply it.
+    press Return.
 
-  Transparent background: save with a transparent page (PNG / SVG /
+  Transparent background: saves with a transparent page (PNG / SVG /
     PDF). It overrides the face color.
 
-  Tight bounding box: trim the surrounding whitespace on export.
+  Tight bounding box: trims the surrounding whitespace on export.
 
   Pad (in): the margin kept around a tight box.
 
   Face: the page background on export. Pick auto (the current
     theme), white, black, or 'none' for a transparent page.
 
-  The typeface and the per-item text sizes live in STYLE > FONTS and
+  The typeface and the per-item text sizes are in STYLE > FONTS and
     beside each text item.
 
 
 EXPORT > EXPORT
 
-  Preview at export size (WYSIWYG): render the on-screen figure at
-    the exact export width and height. You then see the true printed
-    proportions and text size before saving. Off means the figure
-    fills the window, which hides how small 7 pt type looks at 89 mm.
-
   DPI: 72 to 600, used by Save plot and Copy figure. Journal presets
     set 300.
 
-  Save plot...: PNG, PDF, SVG, EPS or TIFF. The tool offers the
-    format you saved last. PDF and SVG are vector.
+  Copy figure: puts the figure on the clipboard as an image, at the
+    Figure size and this DPI. Ctrl+Shift+C.
 
-  Also save PNG / PDF / SVG / TIF: one Save writes every ticked extra
-    format next to the file you named, with the same base name. TIF
-    is the high-resolution raster some submission systems demand.
+  Preview at export size (WYSIWYG): renders the figure at the exact
+    export width and height, so the printed proportions and text
+    size show before saving. Off fills the window.
+
+  Also save PNG / PDF / SVG / TIF: one Save writes every ticked
+    extra format beside the file you name, with the same base name.
 
   Editable text: vector exports embed real TrueType text (fonttype
-    42). Journals accept it, and Illustrator or Inkscape can edit it.
-    Off outlines the text as paths, at exact shapes. It is on by
-    default.
+    42), which Illustrator and Inkscape can edit. Off outlines the
+    text as paths. It is on by default.
 
-  Grayscale copy: also writes <name>_grayscale.png. Use it as the
-    print-survival check on whether the curves still separate.
+  Grayscale copy: also writes <name>_grayscale.png, to check that
+    the curves separate in print.
 
-  Open after: open the saved file in its default viewer.
+  Open after: opens the saved file in its default viewer.
 
   Name: the suggested file name for Save plot. The tokens are {tab}
     {mode} {wf} {preset} {cmap} {date}. The default is
     {tab}_{mode}_{date}.
 
-  PNG, PDF and SVG carry the tool version in their file metadata.
+  Save plot...: PNG, PDF, SVG, EPS or TIFF. SPARTA offers the format
+    you saved last. PDF and SVG are vector, and PNG, PDF and SVG
+    carry the SPARTA version in their metadata.
 
-  Copy figure: put the figure on the clipboard as an image, at the
-    Figure size and this DPI. Paste it into Word, PowerPoint or an
-    email. Ctrl+Shift+C.
-
-  Batch export (one per shown trace)...: solo each shown trace on the
-    figure as it is styled right now. The tool saves one file per
-    trace. The styling covers mode, labels, fonts and journal size.
-    The formats are png, pdf, svg and tif. This is how you get a
-    consistent set of single-trace panels.
-
-  Crop plus min / max nm: limit the CSV exports below to a wavelength
-    range.
-
-  Export CSV...: a menu with two writers.
-      Smoothed CSV (raw + smoothed columns): wavelength, cm-1, eV,
-        the raw columns and the smoothed ones.
-      Defringed CSV (FFT-notch absorbance): the
-        {stem}_absorbance_notch.csv files, notched at the fringe
-        workbench's settings.
-    Both writers work whatever the matching display toggle is set to.
-    Both write one file per trace into a folder you choose.
-
-    Press 'Write to defringe' in FRINGE > FFT REMOVAL and the
-      defringed export uses that notch set: your centres, each at its
-      own absolute half-width, plus each channel's low-pass cutoff.
-      Until then it uses the single automatic fundamental. Reset in
-      the notch list puts the automatic behaviour back. The
-      parameters actually used land in the provenance sidecar, so an
-      export is always traceable to the notch decisions behind it.
-
-  The branch-tagged CSVs live elsewhere. 'Save C/D-tagged CSVs...' is
-    in DATA > TRACES, under 'Export D list'.
+  Batch export (one per shown trace)...: solos each shown trace on
+    the figure and writes one file per trace, in png, pdf, svg or
+    tif. The styling is the current one: mode, labels, fonts and
+    journal size.
 
   Provenance sidecars
-    Every reduction and every batch export writes a JSON sidecar
-    beside its output. The reduction sidecar is
-    _reduction.provenance.json. It records:
-      tool name and version
-      the timestamp it was written
-      the input folder and the output subfolder
-      the absorbance definition, spelled out
-      the Series variable's name and unit
-      how many curves were written
-      whether defringe was on, and with exactly which parameters
-      every curve's identity label and value
-    Export sidecars record the same shape for the batch they cover.
-    A sidecar traces a figure or a CSV back to the settings behind
-    it. The parameters copy straight into a methods section.
+    Every reduction and every export writes a JSON sidecar beside
+    its output. The reduction sidecar is _reduction.provenance.json.
+    It records:
+    - the program name and version
+    - the timestamp
+    - the input folder and the output subfolder
+    - the absorbance definition, spelled out
+    - the series variable's name and unit
+    - how many curves were written
+    - whether defringe was on, and with which parameters
+    - the columns written and the parameters behind them
+    - every curve's identity label and value
 
-  'Export settings' sits in the left panel's Progress card. It
-    prints the current plot configuration into the log, in a
-    paste-ready form.
+    Export sidecars record the same shape for the batch they cover.
+
+  'Export settings' in the left panel's Progress card prints the
+    current plot configuration into the log.
+
+
+EXPORT > DATA FILES
+
+  One list of columns, under the header 'Include in each trace's
+  CSV:'. SPARTA writes one CSV per trace,
+  {DAC}_{sample}_{value}[_C|_D]_absorbance.csv, and these ticks say
+  what it holds. A Run writes them at the end of a reduction. The
+  Export dialog writes the same columns again, for every loaded
+  trace, into a folder you pick.
+
+  Absorbance data (always): the reduction's base columns,
+    Wavelength_nm, Wavenumber_cm-1, Absorbance, Dark, Background and
+    Sample. The row is ticked and disabled, because Run always
+    writes them.
+
+  Defringed data: adds Absorbance_notch, Background_notch and
+    Sample_notch, from FFT-notch cleaning at each trace's own notch
+    list in FRINGE > FFT REMOVAL, or at the global controls.
+    Absorbance_notch is always filled. A channel with no detected
+    fringe leaves its two channel columns blank. The df switch
+    changes the plot only. Default on.
+
+  Smoothed data: adds Absorbance_smoothed, and
+    Absorbance_notch_smoothed while Defringed data is on, at the
+    current DATA > SMOOTHING settings. Default off.
+
+  Formula values: adds one column with the active formula from
+    DATA > FORMULAS. The header is the formula key, with its unit in
+    brackets when one is set. With no formula active the column is
+    skipped and the log says so. Default off.
+
+  C/D tag in file name: puts _C or _D in every file name, after the
+    D toggles and the D list. Off, a name carries the letter only
+    when the raw file name did. Default off.
+
+  The extra columns follow the base set in that order. Nothing is
+    written beside the trace's CSV: the notch columns that used to
+    go into {stem}_absorbance_notch.csv now sit in the CSV itself,
+    and the cd_tagged subfolder is gone.
+
+  'Export data...' opens the Export dialog. The left panel's
+    'Export...' button, between Run and Open output, and Ctrl+E open
+    the same dialog. It is modal, and Escape closes it.
+
+  In the dialog:
+    - Columns holds the same five rows, bound to the same ticks as
+      this section.
+    - Crop plus min / max nm keeps only the rows inside a wavelength
+      range, in every column, with the low and the high edge in nm.
+      It applies to that export alone, never to a Run, and it is not
+      remembered.
+    - Destination plus Browse says where the CSVs go. It opens on
+      the last Run's output folder, then on the Output folder, then
+      on the Input folder.
+    - The note line reads 'These ticks also set what Run writes.'
+      With no traces loaded it reads 'No traces loaded. Run a folder
+      first.' and Export is disabled.
+    - Export writes the files and reports in the dialog's status
+      line, in this section's status line and in the log. Open
+      folder opens the destination, and Close leaves the dialog.
+
+  The dialog covers the loaded traces, not the shown ones, so it
+    puts the same columns on disk as a Run.
+
+  The status line under the button reports the last write: how many
+    traces, which columns and where they went. The per-file lines
+    are in the log.
+
+  An export writes one sidecar, <folder>/_export.provenance.json,
+    of kind "data_files", holding the columns written, the
+    parameters behind them, the crop, the C/D names and the trace
+    count. A Run merges the same columns block into
+    _reduction.provenance.json.
+
+  The four ticks below Absorbance data are saved in the settings
+    file. They are output preferences, so a preset and a project
+    leave them alone. 'Save formula CSVs...' in DATA > FORMULAS
+    still writes the picked formula on its own.
 
 
 EXPORT > 3D PRINTING
 
-  This section writes your data as a solid object you can 3D print.
-  The Shape box picks which object the tool builds. The tool
-  rebuilds the geometry for the export, from the data itself.
+  This section writes the plotted data as a solid object for a 3D
+  printer. SPARTA rebuilds the geometry from the data at export.
 
-  Shape: 'Surface cube' builds the surface the 3D Surface look draws.
-    The data becomes the top face. Four walls drop from its rim to a
-    flat base. This shape needs three or more shown traces.
-    'Folder divider' builds a thin upright plate from ONE trace. The
-    top edge of the plate is that trace. The plate stands on a wider
-    foot, so it holds itself up on a shelf. This shape needs one
-    shown trace.
+  Shape: 'Surface cube' makes the data the top face of a block, with
+    four walls dropping to a flat base. It takes three or more shown
+    traces. 'Folder divider' makes one shown trace the top edge of a
+    thin upright plate on a wider foot.
 
-  What gets exported: the shown traces, on the Y channel you are
-    plotting, at the X unit on screen. The Y channel can be
-    absorbance, a raw channel, or an active formula. The tool applies
-    the same smoothing and defringe the plot uses. What you see is
-    the shape you print.
+  The export covers the shown traces, on the plotted Y channel, at
+    the X unit on screen, with the plot's smoothing and defringe
+    applied. The Y channel is absorbance, a raw channel or a
+    formula.
 
-  Size X/Y (mm): the footprint. X runs along the spectral axis. Y
-    runs along the series axis. The tool stretches the data to fill
-    it, so any ratio works. 80 x 80 is a comfortable desk object.
+  Size X/Y (mm): the footprint. X runs along the spectral axis, Y
+    along the series axis. SPARTA stretches the data to fill it.
+    80 x 80 is a desk object.
 
-  Height Z (mm): the total height at exaggeration 1. It covers the
-    base plus the data relief standing on it.
+  Height Z (mm): the total height at exaggeration 1, base plus
+    relief.
 
-  Base (mm): how thick the slab under the surface is. It gives the
-    print something to stand on. It also keeps the lowest parts of
-    the data from printing as foil. 6 mm is a safe floor for most
-    printers.
+  Base (mm): the slab under the surface. It keeps the lowest data
+    from printing as foil. 6 mm is a safe floor for most printers.
 
-  Z exaggeration: multiplies the relief above the base. 2 makes every
-    feature twice as tall and the print taller with them. The base
-    keeps its thickness. Use it when the structure you care about is
-    small next to the full range of the data.
+  Z exaggeration: multiplies the relief above the base. 2 doubles
+    every feature. The base keeps its thickness.
 
   Plate (mm): the thickness of the divider plate. 2 mm prints solid
-    on a standard nozzle. This row appears for the folder divider.
+    on a standard nozzle.
 
-  Foot (mm): the depth of the foot the divider stands on. The foot
-    runs wider than the plate. 14 mm holds an 80 mm plate upright.
-    This row appears for the folder divider.
+  Foot (mm): the depth of the foot under the divider. It runs wider
+    than the plate. 14 mm holds an 80 mm plate upright.
 
-  One file per trace: the tool writes one divider for every shown
-    trace. The tool asks for a folder. Each file is named after its
-    own trace. Leave this box clear for a single file. The single
-    file uses the trace you selected on the plot.
+  One file per trace: one divider per shown trace into a folder,
+    each file named after its trace. Clear the box for a single
+    file, from the trace selected on the plot.
 
-  For the folder divider, Size X is the width of the plate and Height
-    Z is its total height. Base is the height of the foot. Z
-    exaggeration works the same way. Size Y belongs to the cube.
-    The lowest point of the trace still gets 1 mm of plate above the
-    foot. The thinnest part of the silhouette then prints.
+  The Plate, Foot and One file per trace rows appear for the folder
+    divider. For that shape Size X is the plate width, Height Z its
+    total height, and Base the height of the foot. Size Y belongs to
+    the cube. The lowest point of the trace keeps 1 mm of plate
+    above the foot.
 
-  Export STL...: names the file and writes it. It writes binary STL
-    in millimetres, which every slicer expects. The divider passes
-    the same closed-mesh proof as the cube.
+  Export STL...: writes binary STL in millimetres, which every
+    slicer reads.
 
-  Watertight, And Checked
-    A slicer takes a closed model. The tool proves the mesh closed
-    before it writes a single byte. Every edge carries exactly two
-    triangles. Those two triangles run the edge in opposite
-    directions, which makes the surface normals consistent. The
-    Euler characteristic comes to 2.
+  Mesh check
+    SPARTA checks the mesh before it writes. Every edge carries two
+    triangles wound in opposite directions, the enclosed volume is
+    positive, and
 
       V - E + F = 2
 
-    The enclosed volume comes out positive. A failed check stops
-    the write, and the log names the failure. The numbers go to the
-    log and into the sidecar, so you can check the claim yourself.
+    A failed check stops the write, and the log names the failure.
 
-  The status line under the button reports the triangle count, the
-    watertight result and the file size. The log carries the full
-    report. It names the grid size, the traces it came from and the
-    proof numbers. It also names the physical dimensions, and how
-    many millimetres one unit of the plotted quantity became.
+  The status line reports the triangle count, the watertight result
+    and the file size. The log adds the grid size, the traces, the
+    proof numbers, the physical dimensions and the millimetres per
+    plotted unit.
 
-  The tool writes a <name>.stl.provenance.json sidecar beside the
-    file. It has the same shape as every other export sidecar. It
-    holds the tool and version, the timestamp, the input folder and
-    the series variable. It holds the grid recipe: interpolation,
-    columns, rows, every series value. It holds the physical mapping
-    and the watertightness numbers.
+  The <name>.stl.provenance.json sidecar holds the version, the
+    timestamp, the input folder, the series variable, the grid
+    recipe (interpolation, columns, rows, every series value), the
+    physical mapping and the watertightness numbers.
 
-  Printing Notes
-    Fringes and noise print too. A spectrum full of etalon fringes
-    becomes a field of thin fins. Those fins sit under the
-    resolution of most printers, and a printed fin snaps off. Turn
-    on Smoothing, or
-    tick df, before exporting. The solid then follows the cleaned
-    curve.
-    A big Z exaggeration on a thin base tips over. Raise the base
+  Printing notes
+    Fringes and noise print as thin fins that snap off. Turn on
+    Smoothing, or tick df, before exporting.
+    A large Z exaggeration on a thin base tips over. Raise the base
     when you raise the relief.
-    The lowest value in the data sits on the base. The slab stays
-    solid under a negative baseline.
+    The lowest value sits on the base, so the slab stays solid under
+    a negative baseline.
 
-  Size on disk is about 50 bytes per triangle. The default grid is
+  A file runs about 50 bytes per triangle. The default grid is
   roughly 90 000 triangles, or 4 MB.

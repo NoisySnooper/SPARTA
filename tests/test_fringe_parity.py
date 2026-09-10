@@ -22,6 +22,11 @@ Compared:
     fit_signal_constant_n  n*t, V, phi0, <= 1e-8 relative
     fit_signal_cauchy      A, B, t, phi0, n_mean, <= 1e-8 relative
     solve_paths            exact
+    run_window_fits        vs the real `_run_all_fitters`, per model x window
+                           tier: n_mean / t_um / nt_um / phi0 / model params,
+                           <= 1e-10 relative (drift #1, #5, #6, #7); the tier
+                           SET is asserted against SPARTA's documented gates
+                           (drift #4, #10) rather than against his.
 
 The whole module skips (rather than fails) when the original source tree or the
 spectra are not present, so the suite still runs on a machine without them.
@@ -285,6 +290,68 @@ for name in meta['case_names']:
     cases[name] = rec
 
 res['cases'] = cases
+
+# --- window tiering: the whole of _run_all_fitters' LSQ half ---------------
+# Called for real (not re-implemented here) on the SAME uniform grids SPARTA
+# built, so every number below is his own.  MSV / figures / landscapes are
+# switched off: they are compared elsewhere and cost minutes.
+D.multiscale = False
+D.landscape = False
+D.SAVE_FIGS = False
+D.PLOT_MULTISCALE = False
+_FINE_LO_0, _FINE_HI_0 = D.FINE_WN_LO, D.FINE_WN_HI
+rwf = {}
+for rkey in sorted(meta['rwf_jobs']):
+    j = meta['rwf_jobs'][rkey]
+    name = j['case']
+    D.FIT_WL_MIN_NM = j['wl_min']
+    D.FIT_WL_MAX_NM = j['wl_max']
+    if j['fine_center_cm'] is None:
+        D.FINE_WN_LO, D.FINE_WN_HI = _FINE_LO_0, _FINE_HI_0
+    else:
+        D.FINE_WN_LO = (j['fine_center_cm'] - D.FINE_WIDTH_CM / 2.0) * 1e-7
+        D.FINE_WN_HI = (j['fine_center_cm'] + D.FINE_WIDTH_CM / 2.0) * 1e-7
+    ym = tuple(j['year_month']) if j['year_month'] else None
+    fi = dict(nt_est=float(j['nt_est']), peak_amp=float(j['peak_amp']),
+              peak_phase=float(j['peak_phase']))
+    try:
+        result, _pc, _lc, _sc = D._run_all_fitters(
+            'lsq', fi,
+            job[name + '__rwf_norm_u_full'], job[name + '__rwf_wn_u_full'],
+            job[name + '__rwf_sig_u_full'],
+            job[name + '__wl'], job[name + '__raw'],
+            float(j['nt']), name, False, year_month=ym)
+    except Exception as exc:
+        rwf[rkey] = 'ERROR:%s:%s' % (type(exc).__name__, str(exc)[:160])
+        continue
+    got = {}
+    for mkey, dkey in (('cauchy', 'cauchy'), ('linear_n', 'linear_n'),
+                       ('constant_n', 'constant_n_cw')):
+        sub = result.get(dkey)
+        if not sub:
+            continue
+        per_win = {}
+        for w in ('full', 'wide', 'narrow', 'fine'):
+            if sub.get('n_mean_' + w) is None:
+                continue
+            e = dict(n_mean=float(sub['n_mean_' + w]),
+                     t_um=float(sub['t_um_' + w]),
+                     nt_um=float(sub['nt_um_' + w]),
+                     phi0=float(sub.get('phi0_' + w) or 0.0))
+            if mkey == 'cauchy':
+                e['A'] = float(sub['A_' + w])
+                e['B'] = float(sub['B_' + w])
+            elif mkey == 'linear_n':
+                e['n0'] = float(sub['n0_' + w])
+                e['n1'] = float(sub['n1_' + w])
+            else:
+                e['V'] = float(sub['V_' + w])
+            per_win[w] = e
+        got[mkey] = per_win
+    rwf[rkey] = got
+D.FINE_WN_LO, D.FINE_WN_HI = _FINE_LO_0, _FINE_HI_0
+res['run_window_fits'] = rwf
+
 np.savez(out_npz, **arrays)
 with open(out_json, 'w') as fh:
     json.dump(res, fh)
@@ -386,6 +453,24 @@ _STACKS = [
 _PRESSURES = [0.0, 0.05, 0.5, 1.2, 1.4, 2.0, 5.0, 12.5, 25.0, 40.0]
 _WL_PROBE = [450.0, 600.0, 700.0, 800.0, 1000.0]
 
+# --- window-tiering (run_window_fits <-> _run_all_fitters) job selection ----
+# Every tiering job runs 3 models x 3-4 windows of Nelder-Mead on BOTH sides,
+# so the case list is deliberately short.  'pre' = the pre-Nov-2025 lamp
+# (fine centre 13500 cm^-1, source year_month=None); 'post' = the Nov-2025+
+# lamp (fine centre 11200 cm^-1, source year_month=(2025, 11)), which is the
+# only regime in which either side runs the NARROW tier on a 600-800 nm case.
+_RWF_CASE_ORDER = ['synth_single', 'y04_0p0_bg', 'y04_11p2_bg', 'y04_35p0_bg',
+                   'ta_chewy_ch29']
+_RWF_POST_CASES = ['synth_single', 'y04_0p0_bg']
+_RWF_REGIMES = {
+    'pre':  dict(fine_center_cm=None, year_month=None, lamp_regime=None),
+    'post': dict(fine_center_cm=11200.0, year_month=[2025, 11],
+                 lamp_regime='nov2025_plus'),
+}
+#: Aligned paths must agree to this.  Not a fudge factor: the two sides run the
+#: same optimiser on the same arrays, so the only spread is float association.
+_RWF_TOL = 1e-10
+
 
 @pytest.fixture(scope='module')
 def parity():
@@ -448,6 +533,21 @@ def parity():
             wl, raw, cfg=cfg, label=name, run_fits=False)
         nt_probe = float(nt_det) if nt_det else 24000.0
 
+        # Uniform full grids for the window-tiering comparison.  Both sides get
+        # SPARTA's arrays verbatim, so the tiering is the only thing under test.
+        _fi = _fit.get('fft_info') or {}
+        if nt_det is not None and _fi.get('norm_u_full') is not None:
+            c['rwf'] = dict(wn_u_full=np.asarray(_fi['wn_u_full'], float),
+                            norm_u_full=np.asarray(_fi['norm_u_full'], float),
+                            sig_u_full=np.asarray(_fi['sig_u_full'], float),
+                            nt=float(nt_det),
+                            nt_est=float(_fi['nt_est']),
+                            peak_amp=float(_fi['peak_amp']),
+                            peak_phase=float(_fi['peak_phase']))
+            arrays[name + '__rwf_wn_u_full'] = c['rwf']['wn_u_full']
+            arrays[name + '__rwf_norm_u_full'] = c['rwf']['norm_u_full']
+            arrays[name + '__rwf_sig_u_full'] = c['rwf']['sig_u_full']
+
         arrays[name + '__wl'] = wl
         arrays[name + '__raw'] = raw
         arrays[name + '__periodogram'] = periodogram
@@ -463,12 +563,46 @@ def parity():
         c['norm_u'] = norm_u
         c['periodogram'] = periodogram
 
+    rwf_jobs = {}
+    for name in _RWF_CASE_ORDER:
+        c = cases.get(name)
+        if not c or 'rwf' not in c:
+            continue
+        regimes = ['pre'] + (['post'] if name in _RWF_POST_CASES else [])
+        for regime in regimes:
+            r = _RWF_REGIMES[regime]
+            rwf_jobs['%s@%s' % (name, regime)] = dict(
+                case=name, regime=regime,
+                wl_min=c['wl_min'], wl_max=c['wl_max'],
+                fine_center_cm=r['fine_center_cm'],
+                year_month=r['year_month'],
+                nt=c['rwf']['nt'], nt_est=c['rwf']['nt_est'],
+                peak_amp=c['rwf']['peak_amp'],
+                peak_phase=c['rwf']['peak_phase'])
+
+    # A 6 nm window at the red end of the synthetic spectrum, added in
+    # R15-G to look for the source-side abort the hardening test wants.
+    # It did NOT produce one: both sides tier the sliver and agree on it
+    # exactly (worst rel 0 over its own 51 values), so the two paths are
+    # pinned on a short window as well. The abort branch stays unproved
+    # and the hardening test still skips loudly -- see its docstring.
+    _sc = cases.get('synth_single')
+    if _sc and 'rwf' in _sc:
+        rwf_jobs['synth_single@short'] = dict(
+            case='synth_single', regime='pre',
+            wl_min=794.0, wl_max=800.0,
+            fine_center_cm=None, year_month=None,
+            nt=_sc['rwf']['nt'], nt_est=_sc['rwf']['nt_est'],
+            peak_amp=_sc['rwf']['peak_amp'],
+            peak_phase=_sc['rwf']['peak_phase'])
+
     np.savez(job_npz, **arrays)
     meta = dict(case_names=sorted(cases), cases=meta_cases,
                 solve_cases=_SOLVE_CASES, stacks=_STACKS,
                 pressures=_PRESSURES, wl_probe=_WL_PROBE,
                 n_probe=[1.2, 1.4, 1.6, 1.8, 2.0],
                 V_probe=[0.001, 0.05, 0.2, 0.5, 1.5],
+                rwf_jobs=rwf_jobs,
                 diamond_pressure_gpa=18.5)
     with open(job_json, 'w') as fh:
         json.dump(meta, fh)
@@ -895,6 +1029,269 @@ def test_parity_fine_fit_sigma(parity):
                 assert _rel([got[k]], [v]) <= 1e-10, '%s sigma %s' % (name, k)
 
 
+# ---------------------------------------------------------------------------
+# Window tiering: run_window_fits <-> _run_all_fitters
+# ---------------------------------------------------------------------------
+
+def _rwf_cfg(c, j):
+    """The FringeConfig matching one driver job.
+
+    A job may narrow the fit window (the short-window hardening case); the
+    driver already writes its own FIT_WL_MIN_NM / FIT_WL_MAX_NM from the
+    same two numbers, so both sides read one window.
+    """
+    cfg = c['cfg']
+    if (j.get('wl_min'), j.get('wl_max')) != (c['wl_min'], c['wl_max']):
+        cfg = cfg.evolve(fit_wl_min_nm=float(j['wl_min']),
+                         fit_wl_max_nm=float(j['wl_max']))
+    lamp = _RWF_REGIMES[j['regime']]['lamp_regime']
+    return cfg if lamp is None else cfg.for_lamp_regime(lamp)
+
+
+def _rwf_masks(cfg, wn_u_full):
+    """Per-tier boolean masks, exactly as `run_window_fits` builds them."""
+    wn_lo_narrow = 1.0 / cfg.fit_wl_max_nm
+    wn_hi_narrow = 1.0 / cfg.fit_wl_min_nm
+    return dict(
+        full=np.ones_like(wn_u_full, dtype=bool),
+        wide=(wn_u_full >= cfg.wide_lo) & (wn_u_full <= cfg.wide_hi),
+        narrow=(wn_u_full >= wn_lo_narrow) & (wn_u_full <= wn_hi_narrow),
+        fine=(wn_u_full >= cfg.fine_wn_lo) & (wn_u_full <= cfg.fine_wn_hi))
+
+
+def _rwf_fine_centre_inside_narrow(cfg):
+    """SPARTA's narrow-tier gate (fringe_fit header divergence 4)."""
+    return (1.0 / cfg.fit_wl_max_nm
+            <= cfg.fine_center_cm * 1e-7
+            <= 1.0 / cfg.fit_wl_min_nm)
+
+
+def _rwf_run(c, j):
+    """SPARTA's answer for one driver job, on the driver's own input arrays."""
+    import fringe_fit as FF
+    cfg = _rwf_cfg(c, j)
+    fi = dict(nt_est=j['nt_est'], peak_amp=j['peak_amp'],
+              peak_phase=j['peak_phase'])
+    got = FF.run_window_fits(fi, c['rwf']['norm_u_full'], c['rwf']['wn_u_full'],
+                             cfg=cfg, label=j['case'],
+                             wl_full=np.asarray(c['wl'], float))
+    return cfg, got
+
+
+def _same(a, b):
+    """Relative agreement, counting NaN == NaN (his `wl` IS our `wl`)."""
+    if np.isnan(a) and np.isnan(b):
+        return 0.0
+    return _rel([a], [b])
+
+
+def test_parity_run_window_fits(parity):
+    """The tiered fits, value for value, against his real `_run_all_fitters`.
+
+    Pins the four restored drift items at once (a change to any one of them
+    moves at least one number here by far more than _RWF_TOL):
+      drift #1  n_mean / nt_um average n(lam) over the FULL original wavelength
+                grid, in every tier, for cauchy and linear_n.
+      drift #5  constant_n Fresnel inversion uses wl_ref = mean(1/wn_u_full),
+                one value shared by full/wide/narrow; fine keeps its own.
+      drift #6  no extra min(V, 0.9999) clamp on the constant_n path.
+      drift #7  constant_n t = nt/max(n, 1e-6), never sent through T_BOUNDS.
+    """
+    cases, ref, _arr, meta = parity
+    jobs = meta['rwf_jobs']
+    assert jobs, 'no window-tiering jobs were built'
+    compared = 0
+    worst = 0.0
+    ran = []
+    for rkey in sorted(jobs):
+        j = jobs[rkey]
+        c = cases[j['case']]
+        want = ref['run_window_fits'][rkey]
+        if isinstance(want, str):
+            continue            # see test_parity_run_window_fits_hardening
+        cfg, got = _rwf_run(c, j)
+        masks = _rwf_masks(cfg, c['rwf']['wn_u_full'])
+        fine_in_narrow = _rwf_fine_centre_inside_narrow(cfg)
+        ran.append(rkey)
+
+        for model, wins in want.items():
+            assert model in got, '%s: SPARTA ran no %s' % (rkey, model)
+            for wname, w in wins.items():
+                if wname not in got[model]:
+                    # Deliberate hardening, never a silent miss:
+                    #   drift #10 -- the >=20-point floor now covers full/wide
+                    #   header divergence 4 -- narrow is gated on band overlap
+                    if wname == 'narrow':
+                        assert fine_in_narrow, (
+                            '%s %s: narrow missing without the overlap gate'
+                            % (rkey, model))
+                    else:
+                        assert int(masks[wname].sum()) < cfg.fit_min_points, (
+                            '%s %s: %s tier missing with %d points'
+                            % (rkey, model, wname, int(masks[wname].sum())))
+                    continue
+                g = got[model][wname]
+                for k, v in sorted(w.items()):
+                    d = _same(float(g[k]), float(v))
+                    assert d <= _RWF_TOL, (
+                        '%s %s/%s %s: SPARTA %.17g vs source %.17g (rel=%.3g)'
+                        % (rkey, model, wname, k, g[k], v, d))
+                    worst = max(worst, d)
+                    compared += 1
+
+        # ... and nothing extra: a tier SPARTA ran but he did not can only be
+        # narrow, and only because his lamp-date gate closed it (drift #3, the
+        # D2 item; SPARTA decides from the band overlap instead).
+        for model, wins in got.items():
+            for wname in wins:
+                if wname in want.get(model, {}):
+                    continue
+                assert wname == 'narrow' and not fine_in_narrow, (
+                    '%s %s: SPARTA produced an unexpected %s tier'
+                    % (rkey, model, wname))
+
+    assert ran, 'every tiering job aborted on the source side'
+    assert compared >= 60, 'only %d values compared' % compared
+    print('run_window_fits parity: %d values over %d jobs (%s), worst rel=%.3g'
+          % (compared, len(ran), ', '.join(ran), worst))
+
+
+def test_parity_run_window_fits_hardening(parity):
+    """Where the source aborts the whole channel, SPARTA drops one window.
+
+    Pins drift #4 (the source's `assert n_fit >= 1.0` etc. reach
+    compute_channel_fit's bare except and kill the channel) together with
+    drift #10 (SPARTA's >=20-point floor now also covers full and wide, so the
+    starved tier never reaches a fitter).  Asserted as SPARTA's documented
+    behaviour, not as a loosened tolerance.
+    """
+    cases, ref, _arr, meta = parity
+    jobs = meta['rwf_jobs']
+    aborted = [k for k in sorted(jobs)
+               if isinstance(ref['run_window_fits'][k], str)]
+    if not aborted:
+        # R15-G added synth_single@short (a 6 nm window) hunting for one and
+        # the source completed it too. Skipping loudly beats passing
+        # vacuously: a real abort case is v1.5.0 work.
+        pytest.skip('no source-side abort among the tiering jobs '
+                    '(a 6 nm window did not raise one either)')
+    explained = []
+    for rkey in aborted:
+        j = jobs[rkey]
+        c = cases[j['case']]
+        cfg, got = _rwf_run(c, j)          # must not raise: that is the point
+        assert isinstance(got, dict), rkey
+        masks = _rwf_masks(cfg, c['rwf']['wn_u_full'])
+        starved = set(w for w, m in masks.items()
+                      if int(m.sum()) < cfg.fit_min_points)
+        # No tier below the floor may ever reach a fitter (drift #10).
+        for model, wins in got.items():
+            assert not (starved & set(wins)), (
+                '%s %s: fitted a starved tier %s'
+                % (rkey, model, sorted(starved & set(wins))))
+        if starved:
+            explained.append((rkey, sorted(starved),
+                              ref['run_window_fits'][rkey].split(':')[1]))
+    print('source-side aborts, SPARTA kept going:', aborted)
+    print('  ... explained by the per-tier point floor:', explained)
+
+
+def test_parity_n_mean_uses_the_full_wavelength_grid(parity):
+    """Drift #1, isolated -- and its magnitude, printed.
+
+    The reported n_mean must be mean(n(lam)) over the FULL original detector
+    grid.  The pre-restore value (the window-restricted uniform resample) is
+    recomputed here from the same fitted parameters so the size of the change
+    is on the record.
+    """
+    cases, ref, _arr, meta = parity
+    jobs = meta['rwf_jobs']
+    rows = []
+    for rkey in sorted(jobs):
+        j = jobs[rkey]
+        c = cases[j['case']]
+        if isinstance(ref['run_window_fits'][rkey], str):
+            continue
+        cfg, got = _rwf_run(c, j)
+        masks = _rwf_masks(cfg, c['rwf']['wn_u_full'])
+        wl_full = np.asarray(c['wl'], float)
+        for model in ('cauchy', 'linear_n'):
+            for wname, g in sorted(got.get(model, {}).items()):
+                wl_win = 1.0 / c['rwf']['wn_u_full'][masks[wname]]
+                if model == 'cauchy':
+                    n_full = float(np.mean(g['A'] + g['B'] / wl_full ** 2))
+                    n_win = float(np.mean(g['A'] + g['B'] / wl_win ** 2))
+                else:
+                    n_full = float(np.mean(g['n0'] + g['n1'] / wl_full))
+                    n_win = float(np.mean(g['n0'] + g['n1'] / wl_win))
+                assert _same(float(g['n_mean']), n_full) <= 1e-12, (
+                    '%s %s/%s: n_mean is not the full-grid average'
+                    % (rkey, model, wname))
+                assert _same(float(g['nt_um']),
+                             float(g['n_mean']) * float(g['t_um'])) <= 1e-12,                     '%s %s/%s nt_um' % (rkey, model, wname)
+                if np.isfinite(n_full) and n_full != 0.0:
+                    rows.append((rkey, model, wname, n_win, n_full,
+                                 (n_win - n_full) / n_full))
+    assert rows, 'no dispersive fits to compare'
+    rows.sort(key=lambda r: -abs(r[5]))
+    print('drift #1 magnitude (n_mean window-average -> full-grid average):')
+    for r in rows[:8]:
+        print('   %-26s %-9s %-6s  %.6f -> %.6f  (%+.3g rel)'
+              % (r[0], r[1], r[2], r[3], r[4], r[5]))
+
+
+def test_parity_constant_n_thickness_is_unclamped(parity):
+    """Drift #7 / #5 / #6 on the constant_n path, read off the result dicts.
+
+    t_um is nt/n straight from the fit (no T_BOUNDS clip), nt_um is the fitted
+    n*t, and n comes from the shared full-grid wl_ref for full/wide/narrow
+    while fine uses its own.
+    """
+    import fringe_optics as FO
+    cases, ref, _arr, meta = parity
+    jobs = meta['rwf_jobs']
+    seen = 0
+    for rkey in sorted(jobs):
+        j = jobs[rkey]
+        c = cases[j['case']]
+        if isinstance(ref['run_window_fits'][rkey], str):
+            continue
+        cfg, got = _rwf_run(c, j)
+        wn = c['rwf']['wn_u_full']
+        masks = _rwf_masks(cfg, wn)
+        wl_ref_shared = float(np.mean(1.0 / wn))
+        for wname, g in sorted(got.get('constant_n', {}).items()):
+            wl_ref = (float(np.mean(1.0 / wn[masks['fine']]))
+                      if wname == 'fine' else wl_ref_shared)
+            # drift #6: raw V, no min(V, 0.9999) on this path
+            n_ref = float(FO.fresnel_n_from_V(float(g['V']), wl_ref, cfg=cfg))
+            assert _same(float(g['n_mean']), n_ref) <= 1e-12, \
+                '%s constant_n/%s n_mean' % (rkey, wname)
+            # drift #7: t is nt/n, never clipped into [t_min_nm, t_max_nm]
+            t_nm = float(g['nt_um']) * 1000.0 / max(n_ref, 1e-6)
+            assert _same(float(g['t_um']) * 1000.0, t_nm) <= 1e-12, \
+                '%s constant_n/%s t_um' % (rkey, wname)
+            seen += 1
+    assert seen >= 3, 'only %d constant_n tiers checked' % seen
+
+
+def test_parity_run_window_fits_covers_every_tier(parity):
+    """The harness must actually exercise full, wide, fine AND narrow."""
+    cases, ref, _arr, meta = parity
+    tiers = set()
+    for rkey, j in sorted(meta['rwf_jobs'].items()):
+        if isinstance(ref['run_window_fits'][rkey], str):
+            continue
+        _cfg, got = _rwf_run(cases[j['case']], j)
+        for wins in got.values():
+            tiers |= set(wins)
+    assert {'full', 'wide', 'fine'} <= tiers, sorted(tiers)
+    if any(k.endswith('@post') for k in meta['rwf_jobs']):
+        assert 'narrow' in tiers, (
+            'the post-Nov-2025 lamp job must exercise the narrow tier; got %s'
+            % sorted(tiers))
+
+
 def test_parity_case_coverage(parity):
     """The harness must actually cover real spectra, not just synthetics."""
     cases, _ref, _arr, _meta = parity
@@ -903,268 +1300,3 @@ def test_parity_case_coverage(parity):
     assert any(n.startswith('synth_') for n in cases)
     if os.path.isdir(TA_DIR):
         assert 'ta_chewy_ch29' in cases
-
-
-# ---------------------------------------------------------------------------
-# defringe.py shim: bit-for-bit against the frozen pre-v1.4.9 implementation
-# ---------------------------------------------------------------------------
-#
-# The reference below is the v1.4.8 `defringe.py` numeric path, kept VERBATIM
-# as a regression oracle.  It is deliberately duplicated here rather than read
-# out of git, so the guarantee ("the v1.4.9 shim reproduces the old results
-# bit-for-bit") keeps holding after v1.4.9 is committed.  Do not "fix" it.
-
-_LEGACY_SRC = r'''
-import numpy as np
-from scipy.signal import find_peaks
-from scipy.special import comb
-
-NOTCH_WIDTH_FRAC  = 0.15
-FRINGE_NT_MIN_NM  = 15_000
-FRINGE_NT_MAX_NM  = 100_000
-FRINGE_PVALUE_MAX = 1e-4
-_NM_TO_UM = 1.0e-3
-
-
-def fisher_g_pvalue(periodogram):
-    P = np.asarray(periodogram, dtype=float)
-    n = len(P)
-    if n < 2 or P.sum() <= 0:
-        return 1.0, 1.0
-    g = float(P.max() / P.sum())
-    if not np.isfinite(g) or g <= 0:
-        return g, 1.0
-    p_terms = int(1.0 / g)
-    if p_terms > 30:
-        return g, 1.0
-    pvalue = 0.0
-    for j in range(1, p_terms + 1):
-        term = (-1.0) ** (j - 1) * comb(n, j, exact=True) * (1.0 - j * g) ** (n - 1)
-        pvalue += term
-    pvalue = max(0.0, min(1.0, pvalue))
-    return g, pvalue
-
-
-def detect_fringe_nt(wn_u, sig_u, nt_min_nm=None, nt_max_nm=None):
-    trend = np.polyval(np.polyfit(wn_u, sig_u, 4), wn_u)
-    trend = np.maximum(trend, 0.01 * float(trend.max()))
-    norm_u = sig_u / trend - 1.0
-    window = np.hanning(len(norm_u))
-    sig_win = norm_u * window
-
-    dw = wn_u[1] - wn_u[0]
-    fft_complex = np.fft.rfft(sig_win)
-    fft_amp = np.abs(fft_complex)
-    freqs = np.fft.rfftfreq(len(sig_win), d=dw)
-
-    freq_min = 2.0 * (FRINGE_NT_MIN_NM if nt_min_nm is None else float(nt_min_nm))
-    freq_max = 2.0 * (FRINGE_NT_MAX_NM if nt_max_nm is None else float(nt_max_nm))
-    valid = (freqs >= freq_min) & (freqs <= freq_max)
-    if not valid.any():
-        return None, 1.0
-
-    peaks, _ = find_peaks(fft_amp, prominence=fft_amp[valid].max() * 0.005)
-    peaks_in = peaks[(freqs[peaks] >= freq_min) & (freqs[peaks] <= freq_max)]
-    if len(peaks_in) > 0:
-        peak_idx = int(peaks_in[np.argmax(fft_amp[peaks_in])])
-    else:
-        peak_idx = int(np.argmax(np.where(valid, fft_amp, 0.0)))
-
-    _, pvalue = fisher_g_pvalue(fft_amp[valid] ** 2)
-    return freqs[peak_idx] / 2.0, pvalue
-
-
-def _notch(wn_u, sig_u, wl, raw, nt_nm, width_frac):
-    N = len(sig_u)
-    dw = np.median(np.abs(np.diff(wn_u)))
-    f_center = 2.0 * nt_nm
-
-    pad = N // 2
-    sig_padded = np.concatenate([sig_u[pad:0:-1], sig_u, sig_u[-2:-pad - 2:-1]])
-    N_pad = len(sig_padded)
-
-    S = np.fft.rfft(sig_padded)
-    freqs = np.fft.rfftfreq(N_pad, d=dw)
-
-    sigma_f = width_frac * f_center
-    notch = 1.0 - np.exp(-0.5 * ((freqs - f_center) / sigma_f) ** 2)
-    sig_filtered_padded = np.fft.irfft(S * notch, n=N_pad)
-    sig_filtered = sig_filtered_padded[pad:pad + N]
-
-    fringe_wn = sig_u - sig_filtered
-    fringe_on_wl = np.interp(1.0 / wl, wn_u, fringe_wn)
-    return raw - fringe_on_wl
-
-
-def defringe_channel(wl_nm, counts, width_frac=NOTCH_WIDTH_FRAC,
-                     nt_min_nm=None, nt_max_nm=None, pvalue_max=None):
-    wl_nm = np.asarray(wl_nm, float)
-    y = np.asarray(counts, float)
-    out = y.copy()
-    result = {"clean": out, "applied": False, "nt_um": None, "pvalue": 1.0}
-    if width_frac <= 0:
-        return result
-
-    finite = np.isfinite(y) & np.isfinite(wl_nm) & (wl_nm > 0)
-    if finite.sum() < 16:
-        return result
-
-    wl_f = wl_nm[finite]
-    y_f = y[finite]
-
-    wn = 1.0 / wl_f
-    sidx = np.argsort(wn)
-    wn_s, sig_s = wn[sidx], y_f[sidx]
-    wn_u = np.linspace(wn_s[0], wn_s[-1], len(wn_s))
-    sig_u = np.interp(wn_u, wn_s, sig_s)
-
-    nt_nm, pvalue = detect_fringe_nt(wn_u, sig_u, nt_min_nm, nt_max_nm)
-    result["pvalue"] = pvalue
-    pmax = FRINGE_PVALUE_MAX if pvalue_max is None else float(pvalue_max)
-    if nt_nm is None or nt_nm <= 0 or pvalue > pmax:
-        return result
-
-    out[finite] = _notch(wn_u, sig_u, wl_f, y_f, nt_nm, width_frac)
-    result["applied"] = True
-    result["nt_um"] = float(nt_nm) * _NM_TO_UM
-    return result
-
-
-def defringe_curve(wl_nm, y, width_frac=NOTCH_WIDTH_FRAC, **kw):
-    return defringe_channel(wl_nm, y, width_frac, **kw)["clean"]
-'''
-
-#: The five parameter sets exercised by the shim regression (defaults first).
-_SHIM_VARIANTS = [
-    dict(),
-    dict(width_frac=0.10),
-    dict(width_frac=0.25, nt_min_nm=20000, nt_max_nm=80000, pvalue_max=1e-3),
-    dict(width_frac=0.0),
-    dict(nt_min_nm=8000, nt_max_nm=300000, pvalue_max=0.05),
-]
-
-
-@pytest.fixture(scope='module')
-def legacy_defringe():
-    import types
-    mod = types.ModuleType('defringe_v148_reference')
-    exec(compile(_LEGACY_SRC, 'defringe_v148_reference', 'exec'), mod.__dict__)
-    return mod
-
-
-def _shim_cases():
-    """Synthetic (incl. a NaN-bearing one) + every real Y04_Arch29 channel."""
-    out = []
-    rng = np.random.RandomState(4)
-    wl = np.linspace(380.0, 1050.0, 2400)
-    env = 10000.0 * np.exp(-0.5 * ((wl - 720.0) / 260.0) ** 2) + 500.0
-    for nt, amp, tag in [(24000.0, 0.09, 'synth_single'),
-                         (52000.0, 0.05, 'synth_hi'),
-                         (0.0, 0.0, 'synth_flat')]:
-        mod = amp * np.cos(2.0 * np.pi * 2.0 * nt / wl + 0.4) if amp else 0.0
-        out.append((tag, wl, env * (1.0 + mod) + rng.normal(0, 5, wl.size)))
-    y = env * (1.0 + 0.09 * np.cos(2.0 * np.pi * 2.0 * 24000.0 / wl + 0.4))
-    y = y.copy()
-    y[100:140] = np.nan
-    y[-20:] = np.nan
-    out.append(('synth_nan', wl.copy(), y))
-
-    if HAVE_Y04:
-        files = [f for f in sorted(glob.glob(os.path.join(
-            Y04_CSV_DIR, '*_absorbance.csv'))) if 'notch' not in f]
-        for f in files:
-            w, bg, s = _load_y04(f)
-            stem = os.path.basename(f).replace('_absorbance.csv', '')
-            out.append((stem + '/BG', w, bg))
-            out.append((stem + '/S', w, s))
-    return out
-
-
-def test_shim_constants_and_api_unchanged():
-    import defringe
-    assert defringe.NOTCH_WIDTH_FRAC == 0.15
-    assert defringe.FRINGE_NT_MIN_NM == 15000
-    assert defringe.FRINGE_NT_MAX_NM == 100000
-    assert defringe.FRINGE_PVALUE_MAX == 1e-4
-    for fn in ('defringe_channel', 'defringe_curve', 'write_notch_csv',
-               'fisher_g_pvalue', 'detect_fringe_nt'):
-        assert callable(getattr(defringe, fn)), fn
-
-
-def test_shim_is_bit_identical_to_v148(legacy_defringe):
-    """Every existing caller must get exactly the old numbers back."""
-    import defringe
-    cases = _shim_cases()
-    assert len(cases) >= 4
-    n_checked = 0
-    for tag, wl, y in cases:
-        for kw in _SHIM_VARIANTS:
-            old = legacy_defringe.defringe_channel(wl, y, **kw)
-            new = defringe.defringe_channel(wl, y, **kw)
-            assert np.array_equal(old['clean'], new['clean'], equal_nan=True), \
-                '%s %r clean' % (tag, kw)
-            assert old['applied'] == new['applied'], '%s %r applied' % (tag, kw)
-            assert old['nt_um'] == new['nt_um'], '%s %r nt_um' % (tag, kw)
-            assert old['pvalue'] == new['pvalue'], '%s %r pvalue' % (tag, kw)
-            assert np.array_equal(legacy_defringe.defringe_curve(wl, y, **kw),
-                                  defringe.defringe_curve(wl, y, **kw),
-                                  equal_nan=True), '%s %r curve' % (tag, kw)
-            n_checked += 1
-    print('shim bit-identical on %d case x variant combinations' % n_checked)
-
-
-def test_shim_detect_fringe_nt_matches(legacy_defringe):
-    import defringe
-    for tag, wl, y in _shim_cases()[:6]:
-        finite = np.isfinite(y) & np.isfinite(wl) & (wl > 0)
-        wn = 1.0 / wl[finite]
-        si = np.argsort(wn)
-        wn_u = np.linspace(wn[si][0], wn[si][-1], si.size)
-        sig_u = np.interp(wn_u, wn[si], y[finite][si])
-        a = legacy_defringe.detect_fringe_nt(wn_u, sig_u)
-        b = defringe.detect_fringe_nt(wn_u, sig_u)
-        assert (a[0] is None) == (b[0] is None), tag
-        if a[0] is not None:
-            assert float(a[0]) == b[0], tag
-        assert _rel([a[1]], [b[1]]) <= 1e-12, tag
-
-
-def test_shim_notch_helper_matches(legacy_defringe):
-    import defringe
-    tag, wl, y = _shim_cases()[0]
-    wn = 1.0 / wl
-    si = np.argsort(wn)
-    wn_u = np.linspace(wn[si][0], wn[si][-1], si.size)
-    sig_u = np.interp(wn_u, wn[si], y[si])
-    for frac in (0.15, 0.05, 0.4):
-        a = legacy_defringe._notch(wn_u, sig_u, wl, y, 24000.0, frac)
-        b = defringe._notch(wn_u, sig_u, wl, y, 24000.0, frac)
-        assert np.array_equal(a, b), frac
-
-
-@pytest.mark.skipif(not HAVE_Y04, reason='Y04_Arch29 CSVs unavailable')
-def test_shim_write_notch_csv_is_byte_identical(legacy_defringe, tmp_path):
-    """The exported CSV must be byte-for-byte what v1.4.8 wrote."""
-    import filecmp
-    import defringe
-
-    files = [f for f in sorted(glob.glob(os.path.join(
-        Y04_CSV_DIR, '*_absorbance.csv'))) if 'notch' not in f]
-    wl, bg, s = _load_y04(files[len(files) // 2])
-    result = dict(wl=wl, dark_c=np.full_like(wl, 400.0), bg_c=bg, samp_c=s,
-                  dac='Y04', sample='Arch29', pressure_str='11p2', branch_tag='')
-
-    # v1.4.8's writer, reproduced by calling the shim's writer with the
-    # reference channel function swapped in.
-    old_dir = str(tmp_path / 'old')
-    new_dir = str(tmp_path / 'new')
-    real = defringe.defringe_channel
-    try:
-        defringe.defringe_channel = legacy_defringe.defringe_channel
-        p_old = defringe.write_notch_csv(result, old_dir)
-    finally:
-        defringe.defringe_channel = real
-    p_new = defringe.write_notch_csv(result, new_dir)
-
-    assert os.path.basename(p_old) == os.path.basename(p_new)
-    assert filecmp.cmp(p_old, p_new, shallow=False), 'exported CSV differs'

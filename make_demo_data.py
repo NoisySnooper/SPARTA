@@ -42,7 +42,7 @@ every run and the folder can be shipped verbatim.
 
 Run:  python make_demo_data.py [--out DIR] [--check]
       --check re-reads the folder through engine.scan_folder, through
-      defringe.detect (both channels), and - when the fringe core is
+      the fringe detector (both channels), and - when the fringe core is
       importable - runs the actual three-role solve on every point and
       asserts it lands on the ground truth.
 """
@@ -342,9 +342,9 @@ def check(out_dir=DEMO_DIR):
         print("  engine.run did not reduce every point")
 
     try:
-        import defringe
+        import fringe_apply
     except Exception as e:                              # pragma: no cover
-        print("defringe unavailable (%r); skipping the fringe check" % e)
+        print("fringe_apply unavailable (%r); skipping the fringe check" % e)
         return ok
     for r in sorted(results, key=lambda x: x["pressure_val"]):
         row = ["%5.1f GPa %s" % (r["pressure_val"],
@@ -356,7 +356,7 @@ def check(out_dir=DEMO_DIR):
             if counts is None:
                 row.append("%s: n/a" % ch)
                 continue
-            out = defringe.defringe_channel(r["wl"], counts)
+            out = fringe_apply.clean_channel(r["wl"], counts)
             nt = out.get("nt_um")
             row.append("%s n*t = %s um (want %.2f, p = %.1e)"
                        % (ch, "none" if nt is None else "%.2f" % nt,

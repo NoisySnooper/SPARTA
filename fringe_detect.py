@@ -7,6 +7,13 @@ Vendored from `defringe_dac.py` (DAC Absorption Fringe Analysis).
     Author        : Matthew R. Diamond
     Repository    : github.com/matthewrdiamond/DAC-Absorption-Fringe-Analysis
     License       : vendored under MIT by permission of the author.
+    Upstream snapshot: commit 7988300 (2026-08-03)
+
+Deliberate deviations from that snapshot, kept on purpose (hardening; every
+other difference is a bug): drift #4 per-window rejection instead of hot-path
+asserts, #8 point-count / finiteness gate on detection, #9 Fisher p-value
+overflow guard, #10 the 20-point floor extended to the full and wide tiers,
+#13 ValueError on a zero or negative notch half-width.
 
 Contents (source line refs are into defringe_dac.py):
     fisher_g_pvalue      (:1262)  Fisher's exact periodicity test
@@ -32,9 +39,10 @@ Python 3.8 compatible; numpy + scipy + stdlib only (no pandas, no matplotlib).
 """
 
 import numpy as np
-from scipy.signal import find_peaks
-from scipy.special import comb
 
+# scipy.signal / scipy.special are imported inside the two functions that need
+# them: the live workbench imports this module on every session open, and the
+# fast path (run_fits=False, no Fisher sum) must not pay for them.
 from fringe_config import DEFAULT_CONFIG, NM_TO_UM, make_logger
 from fringe_notch import (band_integrated_amplitude, defringe_fft_notch,
                           notch_width_sweep)
@@ -91,6 +99,7 @@ def fisher_g_pvalue(periodogram, p_terms_max=None, cfg=None):
     p_terms = int(1.0 / g)            # floor(1/g)
     if p_terms > p_terms_max:
         return g, 1.0
+    from scipy.special import comb
     pvalue = 0.0
     for j in range(1, p_terms + 1):
         term = (-1.0) ** (j - 1) * comb(n, j, exact=True) * (1.0 - j * g) ** (n - 1)
@@ -152,10 +161,12 @@ def fft_initial_guess(wl_nm, intensity, cfg=None, log=None, label=''):
 def fft_peak_on_uniform_grid(wn_u, sig_u, cfg=None, log=None, label=''):
     """The FFT peak search of `fft_initial_guess`, on an ALREADY-uniform grid.
 
-    Same return contract, (nt_est, fft_info).  Split out so callers that have
-    built the uniform wavenumber grid themselves (SPARTA's `defringe.py` shim)
-    do not round-trip through 1/wn and pick up last-ulp differences.
+    Same return contract, (nt_est, fft_info).  Split out so a caller that has
+    built the uniform wavenumber grid itself does not round-trip through 1/wn
+    and pick up last-ulp differences.
     """
+    from scipy.signal import find_peaks
+
     cfg = DEFAULT_CONFIG if cfg is None else cfg
     emit = make_logger(log)
     fft_info = None
@@ -296,14 +307,26 @@ def compute_channel_fit(wl, raw, cfg=None, label='', notch_centers_nm=None,
                         tiered dispersion fits under fit['models']; without, it is
                         the fast partial dict carrying raw + the notch-stage
                         fft_info (enough to render raw + FFT/notch overlays).
-      I_notch         - the FFT-notch defringed spectrum (NaN when no fringe /
-                        fit failed), consumed by the corrected-absorbance step.
+      I_notch         - the FFT-notch defringed spectrum, consumed by the
+                        corrected-absorbance step.  All-NaN when no mask ran:
+                        no fringe was detected, so nothing was applied.
       nt              - accepted fundamental n*t (nm) or None.
       default_centers - [nt] (the fundamental) or [] -- the default notch list.
 
-    notch_centers_nm : explicit notch n*t centers (nm) for the baseline notch + width
-                       sweep. None -> fundamental only.  run_fits=False stops after the
-                       notch stage (fast live path; no optimisers run, a few ms).
+    NO FRINGE, NO MASK.  The whole notch stage is gated on the detection, the
+    source's own gate: with no accepted n*t there is no notch AND no low-pass,
+    I_notch stays all-NaN, fft_info carries no 'I_notch_1x' and default_centers
+    is empty.  A channel the detector passed over is handed back exactly as it
+    came in, which is what the source's batch and GUI both do with it.
+
+    notch_centers_nm : once a fringe IS detected, the caller's own answer, three
+                       states.  A LIST of n*t centers (nm) notches exactly those.
+                       An EMPTY list notches nothing.  None means automatic: the
+                       fundamental this call detected.  The low-pass is
+                       independent of the LIST -- on is on, with or without
+                       centres -- but not of the detection.  run_fits=False stops
+                       after the notch stage (fast live path; no optimisers run,
+                       a few ms).
 
     SPARTA divergence: the source signature carries out_dir / base_stem / fig_dir /
     plotdata_dir and writes figures and CSVs as a side effect.  This one is pure --
@@ -357,7 +380,15 @@ def compute_channel_fit(wl, raw, cfg=None, label='', notch_centers_nm=None,
             np.polyfit(wn_u_full, sig_u_full, cfg.detrend_poly_deg), wn_u_full)
         trend_u_full = np.maximum(trend_u_full, 0.01 * float(trend_u_full.max()))
 
-        # Notch-filter normalization (all methods use this)
+        # Notch-filter normalization (all methods use this).
+        # THE WHOLE STAGE IS GATED ON THE DETECTION, the source's own gate
+        # (defringe_dac.py:17752).  No accepted n*t means no notch and no
+        # low-pass: the channel is handed back untouched, I_notch stays all-NaN
+        # and no cleaned curve exists to draw or to report a thickness for.
+        # Once a fringe IS detected the notch list keeps its three states --
+        # named centres, [] for none, None for the detected fundamental -- and
+        # the low-pass is independent of the LIST, so an empty list with the
+        # low-pass on is a low-pass alone.
         if nt is not None:
             I_notch, _, sig_filtered_wn = defringe_fft_notch(
                 wn_u_full, sig_u_full, wl, raw, nt,
@@ -378,7 +409,15 @@ def compute_channel_fit(wl, raw, cfg=None, label='', notch_centers_nm=None,
             # fft_initial_guess for FFT peak-finding.
             notch_baseline = np.clip(sig_filtered_wn, 1e-6, None)
             norm_u_full = (sig_u_full - notch_baseline) / notch_baseline
+            fft_info['wn_u_full'] = wn_u_full
+            fft_info['sig_u_full'] = sig_u_full
+            fft_info['norm_u_full'] = norm_u_full
+            fft_info['trend_u_full'] = trend_u_full
+            fft_info['notch_baseline'] = notch_baseline
 
+        # Everything below reads the fundamental: the band amplitude, the width
+        # sweep and the notch-refined peak are all measurements OF it.
+        if nt is not None:
             # Band-integrated (spread-aware) amplitude -- DIAGNOSTIC only; reported n is
             # unchanged. Integrates the fundamental-band FFT power over the fundamental's
             # absolute um +-reach. Operates on the SAME notch-baseline norm_u_full the fits
@@ -413,7 +452,9 @@ def compute_channel_fit(wl, raw, cfg=None, label='', notch_centers_nm=None,
             # Notch width sweep (dispersion diagnostic) -- cascade of FACTORS around the
             # effective per-peak half-widths. Gated on run_fits, the cheapest gate that
             # covers every drawing path yet skips this ~5x defringe on every live update.
-            if run_fits:
+            # An empty centre list is a decision -- notch nothing -- so there is
+            # no width to sweep and the 5x defringe is skipped outright.
+            if run_fits and (notch_centers_nm is None or len(notch_centers_nm)):
                 _eff_centers = (notch_centers_nm if notch_centers_nm is not None
                                 else [nt])
                 _eff_widths = (notch_halfwidths_um if notch_halfwidths_um is not None
@@ -442,11 +483,6 @@ def compute_channel_fit(wl, raw, cfg=None, label='', notch_centers_nm=None,
                 _nr_amp_val = float(fft_info.get('peak_amp', 0))
                 _nr_phase = fft_info.get('peak_phase', 0.0)
 
-            fft_info['wn_u_full'] = wn_u_full
-            fft_info['sig_u_full'] = sig_u_full
-            fft_info['norm_u_full'] = norm_u_full
-            fft_info['trend_u_full'] = trend_u_full
-            fft_info['notch_baseline'] = notch_baseline
             fft_info['notch_refined_nt'] = _nr_nt
             fft_info['notch_refined_amp'] = _nr_amp_val
             fft_info['notch_refined_phase'] = _nr_phase
@@ -474,7 +510,10 @@ def compute_channel_fit(wl, raw, cfg=None, label='', notch_centers_nm=None,
              % (label, pv, cfg.fringe_pvalue_max))
         fit = dict(raw=raw, fft_info=fft_info, no_fringe=True,
                    raw_minus_dark=raw_minus_dark, models={})
-        return fit, np.full_like(raw, np.nan), None, default_centers
+        # No fundamental, so no fits and no mask: nothing the caller named --
+        # centres, a low-pass, or both -- was applied, I_notch is all-NaN and
+        # fft_info carries no 'I_notch_1x'.  The channel is untouched.
+        return fit, I_notch, None, default_centers
 
     if not run_fits:
         fit = dict(raw=raw, fft_info=fft_info, no_fringe=False,
@@ -484,8 +523,11 @@ def compute_channel_fit(wl, raw, cfg=None, label='', notch_centers_nm=None,
     # Imported lazily: the fast path (run_fits=False) never needs the optimisers.
     from fringe_fit import run_window_fits
     try:
+        # `wl` is the source's `wl`: the full ORIGINAL detector wavelength grid.
+        # Every tier's n_mean / nt_um averages n(lam) over it (source :16097).
         models = run_window_fits(fft_info, norm_u_full, wn_u_full, cfg=cfg,
-                                 label=label, log=log, method=method)
+                                 label=label, log=log, method=method,
+                                 wl_full=wl)
     except _DETECT_ERRORS as exc:
         emit("%s %s fit failed (%s): %s"
              % (label, method, type(exc).__name__, exc))

@@ -9,6 +9,9 @@ build-env/
 __pycache__/
 *.pyc
 
+# editor / tool backups (app.py.bak must never be committed)
+*.bak
+
 # runtime settings (per-user)
 .quicklook_settings.json
 
@@ -37,3 +40,6 @@ thickness_proto.py
 
 # win7 package tree (rebuilt on demand)
 dist_win7/
+
+# internal test-suite policy note (kept locally, not published)
+tests/TESTING_POLICY.md

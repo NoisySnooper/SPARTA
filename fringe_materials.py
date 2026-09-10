@@ -8,6 +8,13 @@ Vendored from `defringe_dac.py` (DAC Absorption Fringe Analysis).
     Author        : Matthew R. Diamond
     Repository    : github.com/matthewrdiamond/DAC-Absorption-Fringe-Analysis
     License       : vendored under MIT by permission of the author.
+    Upstream snapshot: commit 7988300 (2026-08-03)
+
+Deliberate deviations from that snapshot, kept on purpose (hardening; every
+other difference is a bug): drift #4 per-window rejection instead of hot-path
+asserts, #8 point-count / finiteness gate on detection, #9 Fisher p-value
+overflow guard, #10 the 20-point floor extended to the full and wide tiers,
+#13 ValueError on a zero or negative notch half-width.
 
 Every physical constant below is copied with its source citation VERBATIM from
 defringe_dac.py:126-935.  Nothing here is refitted, and no constant has been
@@ -36,8 +43,9 @@ SPARTA adaptations
 """
 
 import numpy as np
-from scipy.integrate import quad
-from scipy.optimize import brentq
+# scipy.integrate and scipy.optimize are imported inside the four
+# functions that use them (P6): the EOS inversions are a rare path, and
+# every fringe import walks through this module.
 
 from fringe_optics import (DIAMOND_K0, DIAMOND_K0P, N_DIAMOND_CONST,
                            bm3_p_from_v_ratio, bm3_v_ratio, n_diamond,
@@ -345,6 +353,7 @@ def ar_debye_D(y):
         return 1.0
     if y > 30.0:                      # high-y limit; integral → π⁴/15
         return 3.0 * (np.pi ** 4 / 15.0) / y ** 3
+    from scipy.integrate import quad
     return 3.0 / y ** 3 * quad(lambda t: t ** 3 / np.expm1(t), 0.0, y)[0]
 
 
@@ -375,6 +384,7 @@ def ar_density(P_gpa, T=_AR_T_REF):
     below ~0.78 GPa (argon is fluid there), so this is only called for
     P ≥ _AR_P_MIN; callers handle the sub-solid range separately.
     """
+    from scipy.optimize import brentq
     N_AV = 6.02214076e23
     x = brentq(lambda xx: ar_pressure(xx, T) - float(P_gpa), 0.15, 3.0)
     return _AR_M / (x * _AR_V0 * 1e-24 * N_AV)
@@ -459,6 +469,7 @@ def ar_density_chen(P_gpa):
 
     # P(η) is monotonic in η over the physical range; bracket from mild expansion
     # (η=0.5, P well below the solid branch) to strong compression (η=3).
+    from scipy.optimize import brentq
     eta = brentq(lambda e: _P_of_eta(e) - float(P_gpa), 0.5, 3.0)
     return _AR_CHEN_RHOREF * eta
 
@@ -504,6 +515,7 @@ def ar_volume(P_gpa, T=_AR_T_REF):
 
     Same inversion of P(V,T) as ar_density, but returns V = x·V₀ directly rather
     than converting to mass density — the L-vs-pressure overlay needs V, not ρ."""
+    from scipy.optimize import brentq
     x = brentq(lambda xx: ar_pressure(xx, T) - float(P_gpa), 0.15, 3.0)
     return x * _AR_V0
 

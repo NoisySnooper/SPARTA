@@ -7,7 +7,11 @@ every test seeds the panel's state directly and asserts the rule:
 
   - the batch-format notch override rows, fundamental first;
   - the seeded role glyphs: parked on the predicted paths, ordered, and
-    never over a placement the user or a session already made;
+    never over a placement the user or a session already made.  R17 gave
+    `_seed_roles` a second path -- a point with no inputs of its own aligns
+    to the tallest peak of each panel instead (D3, `allow_align`) -- so the
+    calls here pass `allow_align=False` and stay about the model path.  The
+    cold start is pinned in `test_r17_w3.py`;
   - the FFT right-click menu offers each panel exactly its own roles;
   - `_resolve_point` is LOSSLESS at the recorded indices, which is the
     whole claim behind the Results view's "exact re-solve";
@@ -56,7 +60,16 @@ def fw(a):
 # ---------------------------------------------------------------------------
 # notch overrides: the file Matthew's batch mode reads
 # ---------------------------------------------------------------------------
-def test_notch_override_rows_are_batch_shaped_and_fundamental_first(a, fw):
+def test_notch_override_rows_are_batch_shaped_and_ascending(a, fw):
+    """His file order, not ours.
+
+    R18-F/G13: his _export_notches writes `for c in
+    sorted(_active_centers(ch))` (defringe_dac 15005), so each
+    channel's rows go out ASCENDING in n*t and the is_fundamental
+    flag rides on whichever row is the fundamental.  SPARTA used to
+    hoist the fundamental to the top, which put a file his batch
+    reader diffs in a different order for the same notches.
+    """
     a.results = [make_result("R1", 1.0, dac="Y04", sample="Arch29",
                              pstr="1p0")]
     fw._label = "R1"
@@ -72,9 +85,9 @@ def test_notch_override_rows_are_batch_shaped_and_fundamental_first(a, fw):
     assert [r[1] for r in rows] == ["Sample"] * len(rows)
     assert [r[0] for r in rows] == ["y04_arch29_1p0"] * len(rows), \
         "the stem is the batch pipeline's, not the display label"
-    assert [(r[2], r[3]) for r in rows] == [(48.55, 1), (32.39, 0)], rows
-    assert rows[0][4] == 4.25              # its own half-width
-    assert rows[1][4] == pytest.approx(float(fw.hw_v.get()))
+    assert [(r[2], r[3]) for r in rows] == [(32.39, 0), (48.55, 1)], rows
+    assert rows[1][4] == 4.25              # its own half-width
+    assert rows[0][4] == pytest.approx(float(fw.hw_v.get()))
 
     # and the CSV writer is the same rows, in the same order
     import tempfile
@@ -138,7 +151,10 @@ def test_role_glyphs_seed_onto_the_predicted_paths_and_defer_to_the_user(
     # fallback would pick the wrong pair
     A, C, iii = pred["sample"], pred["sampledia"], pred["mediumdia"]
     _fake_peaks(fw, monkeypatch, [C * 0.9, A * 0.9], [iii * 0.95])
-    fw._seed_roles(p, 1e4)
+    # allow_align=False: this trace has no committed inputs, so the R17 cold
+    # start would put both Sample glyphs on ONE peak before the prediction
+    # was ever consulted.  That path is test_r17_w3.py's.
+    fw._seed_roles(p, 1e4, allow_align=False)
     roles = fw._tr()["roles"]
     assert roles["sample"]["nt_um"] == pytest.approx(A * 0.9)
     assert roles["sampledia"]["nt_um"] == pytest.approx(C * 0.9)
@@ -149,12 +165,12 @@ def test_role_glyphs_seed_onto_the_predicted_paths_and_defer_to_the_user(
     assert fw._dirty_items() == []
 
     # a second pass leaves them exactly where they are
-    fw._seed_roles(p, 1e4)
+    fw._seed_roles(p, 1e4, allow_align=False)
     assert fw._tr()["roles"]["sample"]["nt_um"] == pytest.approx(A * 0.9)
 
     # ...and a glyph the user placed is never overwritten, on this trace
     fw._assign_role_here("sample", 5.0)
-    fw._seed_roles(p, 1e4)
+    fw._seed_roles(p, 1e4, allow_align=False)
     assert fw._tr()["roles"]["sample"]["nt_um"] == pytest.approx(5.0)
     assert not fw._tr()["roles"]["sample"].get("seed")
     assert fw._dirty_items() == ["this trace is waiting for its first "
@@ -167,9 +183,9 @@ def test_role_glyphs_seed_onto_the_predicted_paths_and_defer_to_the_user(
     state = {"chan": {}, "solved": None,
              "roles": {r: {"nt_um": 11.0 + i, "auto": False}
                        for i, r in enumerate(fringe_panel.ROLES)}}
-    fw._apply_trace_state("R2", state)
+    fw._apply_trace_state(fw._dkey("R2"), state)
     fw._commit("R2")
-    fw._seed_roles(fw._stack_params(fw._record()), 1e4)
+    fw._seed_roles(fw._stack_params(fw._record()), 1e4, allow_align=False)
     assert [fw._tr()["roles"][r]["nt_um"] for r in fringe_panel.ROLES] == \
         [11.0, 12.0, 13.0]
     assert fw._dirty_items() == []
@@ -177,7 +193,8 @@ def test_role_glyphs_seed_onto_the_predicted_paths_and_defer_to_the_user(
     # a prediction nowhere near the data (the Stack still holds its
     # defaults): fall back to the strongest peaks, in n*t order, so the
     # pair the solve gets is still invertible
-    fw._label, fw._trace["R1"] = "R1", {
+    fw._label = "R1"
+    fw._trace[fw._dkey("R1")] = {
         "roles": {r: None for r in fringe_panel.ROLES},
         "gauss": {r: None for r in fringe_panel.ROLES}, "solved": None}
     was_t = fw.t_v.get()
@@ -186,7 +203,8 @@ def test_role_glyphs_seed_onto_the_predicted_paths_and_defer_to_the_user(
     fw._suspend = False
     try:
         _fake_peaks(fw, monkeypatch, [40.0, 12.0], [9.0])
-        fw._seed_roles(fw._stack_params(fw._record()), 1e4)
+        fw._seed_roles(fw._stack_params(fw._record()), 1e4,
+                       allow_align=False)
         placed = fw._tr()["roles"]
         assert placed["sample"]["nt_um"] == pytest.approx(12.0)
         assert placed["sampledia"]["nt_um"] == pytest.approx(40.0)
@@ -197,7 +215,8 @@ def test_role_glyphs_seed_onto_the_predicted_paths_and_defer_to_the_user(
         fw._suspend = False
 
     # no peak worth landing on: nothing is parked, and the line says why
-    fw._label, fw._trace["R1"] = "R1", {
+    fw._label = "R1"
+    fw._trace[fw._dkey("R1")] = {
         "roles": {r: None for r in fringe_panel.ROLES},
         "gauss": {r: None for r in fringe_panel.ROLES}, "solved": None}
     fw._seed_said.clear()
@@ -205,7 +224,7 @@ def test_role_glyphs_seed_onto_the_predicted_paths_and_defer_to_the_user(
     said = []
     monkeypatch.setattr(fw, "_status",
                         lambda msg, **kw: said.append(msg))
-    fw._seed_roles(p, 1e4)
+    fw._seed_roles(p, 1e4, allow_align=False)
     assert not any(fw._tr()["roles"].values())
     assert said and "the detector missed this trace" in said[0]
 
@@ -261,7 +280,7 @@ def _point(label="R1", p=1.0):
     A, C, iii, n_l2, n_med = 48.0, 62.0, 71.0, 1.42, 1.42
     sol = fringe_optics.solve_paths(A, C, iii, n_l2, n_med)
     assert sol is not None
-    return {"label": label, "pressure": p, "branch": "C",
+    return {"label": label, "stem": label, "pressure": p, "branch": "C",
             "A": A, "C": C, "iii": iii,
             "medium": "argon", "layer2": False, "layer2_name": "argon",
             "n_medium": n_med, "n_layer2": n_l2, "diamond": "peter",
@@ -317,7 +336,7 @@ def test_the_series_survives_a_save_and_load_round_trip(a, fw, tmp_path):
         assert os.path.basename(path) == fringe_panel.SERIES_FILE
         payload = json.load(open(path, encoding="utf-8"))
         assert payload["schema"] == fringe_panel.SERIES_SCHEMA
-        assert set(payload["points"]) == {"R1", "R2"}
+        assert set(payload["points"]) == {"stem:R1", "stem:R2"}
         # the stamped copy is the insurance against a save over a good series
         stamps = [n for n in os.listdir(str(tmp_path))
                   if n != fringe_panel.SERIES_FILE and n.endswith(".json")

@@ -304,20 +304,33 @@ def test_moved_controls_live_in_their_new_homes(a):
     assert not _inside(a.left, a._auto_rescan_sw)
     assert [w.cget("text") for w in kids(rows[1], "Label")] == \
         ["Auto rescan", "every", "s"]
-    # the C/D CSV button sits in Traces, directly under 'Export D list'
-    assert _inside(tr, a._cd_export_btn)
-    assert not _inside(ex, a._cd_export_btn)
+    # R19: the branch-tagged CSVs are a tick in EXPORT > DATA FILES,
+    # so Traces keeps only its own D-list export, and the one export
+    # button on the Export tab lives in Data files, not in Export
+    assert not hasattr(a, "_cd_export_btn")
     assert [w.cget("text") for w in tr.winfo_children()
             if w.winfo_class() == "TButton"] == \
-        ["Export D list (CSV) by selection",
-         "Save C/D-tagged CSVs" + chr(0x2026)]
+        ["Export D list (CSV) by selection"]
+    assert not _inside(ex, a._export_data_btn)
     # PANEL_GUIDE points at the new homes. Headings are "TAB > SECTION"
     # now, so the Auto-rescan text has to sit inside the PLOT > PLOT MODE
     # block (the guide's sections are separated by a blank line).
     assert "PLOT > PLOT MODE\n" in app.PANEL_GUIDE
     _pm = app.PANEL_GUIDE.split("PLOT > PLOT MODE\n", 1)[1].split("\n\n", 1)[0]
     assert "Auto rescan" in _pm
-    assert "Data tab > Traces" in app.PANEL_GUIDE
+    # R19 moved the branch-tagged writer the other way: it is no longer a
+    # button in Traces that the guide points AT, it is a row of the new
+    # EXPORT > DATA FILES section, and the DATA > TRACES block points at
+    # it.  Both ends are pinned so the pair cannot drift.
+    # R20 merged the products into ONE CSV per trace, so that row now names
+    # the FILE NAME rule and reads 'C/D tag in file name'.  The retired
+    # label is pinned absent as well, and the live one is matched over
+    # collapsed whitespace because the guide wraps at 72 columns.
+    assert "EXPORT > DATA FILES\n" in app.PANEL_GUIDE
+    _tr = app.PANEL_GUIDE.split("DATA > TRACES\n", 1)[1].split("\n\n", 1)[0]
+    assert "EXPORT >" in " ".join(_tr.split())
+    assert "C/D tag in file name" in " ".join(app.PANEL_GUIDE.split())
+    assert "C/D-tagged CSV" not in app.PANEL_GUIDE
     # R12 (STE100): the guide spells a definition with a colon, never
     # with the " - " prose dash the register bans.
     assert "Branch tags:" in app.PANEL_GUIDE

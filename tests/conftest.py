@@ -1,13 +1,20 @@
 """Shared pytest setup for the SPARTA suite.
 
-Four jobs:
+Five jobs:
 
 * put the tool directory on sys.path so the tests can import
-  engine / defringe / app no matter where pytest is launched from;
+  engine / fringe_apply / app no matter where pytest is launched from;
 
 * point the app at a throwaway settings file so a test run can never write
   into the live ``.quicklook_settings.json`` (it used to clobber the saved
   folders and theme);
+
+* point the crash log at a throwaway file for the same reason.  R17 gave
+  the App a ``report_callback_exception`` handler that appends every dead
+  Tk callback to ``sparta_errors.log`` beside the program, and a suite that
+  deliberately raises inside callbacks would otherwise grow that file in
+  the repository.  The session fixture below redirects it and then checks
+  that nothing wrote one anyway;
 
 * own the ONE off-screen Tk root and the ONE App the whole GUI suite
   shares.  Every module used to build its own App on the shared root, and
@@ -36,8 +43,20 @@ import app                                              # noqa: E402
 import formulas as _F                                   # noqa: E402
 import smoothing as _S                                  # noqa: E402
 
-app.SETTINGS_PATH = os.path.join(tempfile.mkdtemp(prefix="sparta_test_"),
-                                 "settings.json")
+_TMP_DIR = tempfile.mkdtemp(prefix="sparta_test_")
+app.SETTINGS_PATH = os.path.join(_TMP_DIR, "settings.json")
+
+# The crash log, redirected at IMPORT and not only in the fixture below: the
+# module constant is read by App._report_callback_error through a getattr
+# fallback, so a handler that fires before any fixture has run still lands in
+# the tempdir rather than in the tool folder.
+TEST_ERROR_LOG = os.path.join(_TMP_DIR, "sparta_errors.log")
+app.ERROR_LOG_PATH = TEST_ERROR_LOG
+app.App._error_log_path = TEST_ERROR_LOG       # every instance, later ones too
+
+#: the file the suite must never create.  ``app.TOOL_DIR`` is the program
+#: folder, which for a source checkout is the repository root.
+REPO_ERROR_LOG = os.path.join(app.TOOL_DIR, "sparta_errors.log")
 
 OFF = "+3200+100"          # the project's off-screen probe position
 
@@ -115,6 +134,18 @@ def reset_app(a):
     re-set (writing ``theme_mode`` alone costs ~1.9 s)."""
     close_toplevels()
     quiesce(a)
+    # T2: the two formula refreshes at the end of this function rebuild the
+    # formula rows and re-run the Y pickers, and the NEXT test's update()
+    # pays for the relayout they queue.  A test that never touched the
+    # formula list leaves the shipped quantities, an empty pick and an
+    # untouched cache, so both calls reproduce what is already on screen.
+    # Read BEFORE the preset loop below, which puts active_qty back itself.
+    _qty_dirty = (a.quantities != _F.default_quantities()
+                  or a._qty_sel.get() != ""
+                  or a.active_qty.get() != ""
+                  or bool(a._qty_cache)
+                  or a._qty_cache_sig is not None
+                  or "quantities" in a.settings)
     reg = a._preset_registry()
     for k, want in a._defaults.items():
         v = reg.get(k)
@@ -134,10 +165,36 @@ def reset_app(a):
     a.in_var.set("")               # not a preset var: it is workflow state
     a.auto_rescan.set(False)
     a.rescan_interval.set(30)
+    # R19: the EXPORT > DATA FILES ticks are settings state, not
+    # preset state, so the preset loop above cannot restore them and
+    # one test that ticks C/D-tagged would otherwise decide what the
+    # next test writes to disk
+    for _k, _d in getattr(app, "EXPORT_PRODUCT_DEFAULTS", {}).items():
+        _v = getattr(a, "export_products", {}).get(_k)
+        try:
+            if _v is not None and _v.get() != _d:
+                _v.set(_d)
+        except Exception:
+            pass
+    # R20: Crop belongs to one export, not to the next one
+    for _v in (a.crop_on, a.crop_min, a.crop_max):
+        try:
+            _v.set(False if _v is a.crop_on else "")
+        except Exception:
+            pass
+    # the two status lines: cleared AND unpacked, the way _show_status
+    # leaves them, so a test that asserts an empty section is not looking
+    # at a row the previous test packed (R20 2.5)
+    for _sl in ("_data_status", "_stl_status", "_export_status"):
+        try:
+            a._show_status(getattr(a, _sl, None), "")
+        except Exception:
+            pass
     a.quantities = _F.default_quantities()
     # naming profiles are global settings state: a test that commits one
     # would otherwise decide how the NEXT test's folder parses
-    for key in ("quantities", "profiles", "active_profile", "name_overrides"):
+    for key in ("quantities", "profiles", "active_profile",
+                "name_overrides", "export_products"):
         a.settings.pop(key, None)
     a._qty_sel.set("")
     a._label_edited["ylabel"] = False
@@ -154,9 +211,47 @@ def reset_app(a):
             a._close_session(len(a.sessions) - 1)
         except Exception:
             break
-    a._refresh_quantity_rows()
-    a._refresh_ydata_values()
+    if _qty_dirty:
+        a._refresh_quantity_rows()
+        a._refresh_ydata_values()
     quiesce(a)
+
+
+# ------------------------------------------------------------- crash log ---
+@pytest.fixture(scope="session", autouse=True)
+def _no_error_log_in_the_repo():
+    """Keep the R17 crash log out of the tool folder, and prove it.
+
+    Two halves.  Going in, the module constant and the App's per-instance
+    override both point into the session tempdir, so a test that raises
+    inside a Tk callback on purpose writes there.  Coming out, the tool
+    folder is checked: a ``sparta_errors.log`` that appeared, or grew,
+    during the run is a real escape and the session says so with the file's
+    own text, because a silent one would ship in the next zip.
+    """
+    app.ERROR_LOG_PATH = TEST_ERROR_LOG
+    app.App._error_log_path = TEST_ERROR_LOG
+    try:
+        before = os.path.getsize(REPO_ERROR_LOG)
+    except OSError:
+        before = None                      # the normal case: no such file
+    yield
+    try:
+        after = os.path.getsize(REPO_ERROR_LOG)
+    except OSError:
+        return                             # still no such file: nothing wrote
+    if before is not None and after == before:
+        return                             # it predates this run, untouched
+    try:
+        with open(REPO_ERROR_LOG, encoding="utf-8", errors="replace") as fh:
+            body = fh.read()[-4000:]
+    except OSError as exc:                 # unreadable, but it is still there
+        body = "<could not read: %r>" % (exc,)
+    pytest.fail(
+        "the suite wrote %s (%d bytes, was %s). A test raised inside a Tk "
+        "callback and the handler's redirect was bypassed. Delete the file "
+        "once the cause is fixed.\n%s" % (REPO_ERROR_LOG, after, before, body),
+        pytrace=False)
 
 
 @pytest.fixture(autouse=True)
@@ -164,7 +259,7 @@ def _shared_app_reset(request):
     """Hand every test a clean App and leave one behind.
 
     Only arms for modules that declare ``USES_APP = True``; the pure-module
-    files (engine, formulas, defringe, fringe core / parity) never touch Tk
+    files (engine, formulas, fringe core / apply / parity) never touch Tk
     and must not pay for it."""
     yield
     if _APP is not None and getattr(request.module, "USES_APP", False):

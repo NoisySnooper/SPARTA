@@ -1,12 +1,12 @@
 {
   "schema": "sparta_guide_content/v1",
-  "written_for": "SPARTA v1.4.9",
-  "source_of_truth": "app.py v1.4.9 sha 903b16af02e0, fringe_panel.py, fringe_popout.py, engine.py, formulas.py, defringe.py, smoothing.py, README.md, DESIGN_RULES.md, PLAN_v149.md",
+  "written_for": "SPARTA v1.5.0",
+  "source_of_truth": "app.py v1.5.0, fringe_panel.py, fringe_popout.py, engine.py, formulas.py, fringe_apply.py, fringe_notch.py, smoothing.py, README.md, DESIGN_RULES.md, PLAN_v149.md, PLAN_R19.md, PLAN_R20.md",
   "consumer": "the wiring agent: build REF_VIEWS from `views` in `dropdown_order`",
   "format_contract": {
     "line_width": "wrapped at or under 72 characters",
     "headings": "ALL-CAPS, column 0, first character alphabetic",
-    "indent": "two spaces per nesting level; six or more spaces marks a line whose horizontal alignment is meaningful (render monospace)",
+    "indent": "two spaces per nesting level, and a wrapped line continues its item at the item's indent plus two. A line indented six or more spaces renders monospace ONLY when it is a table row (three or more internal spaces, or two or more with a monospace sibling at the same indent) or a verbatim shape (a token carrying one of = -> / \\ < > { } [ ] or two digits, in a line that is not three consecutive lowercase words). Prose at six or more spaces renders as prose and joins the item above it, so a six-space indent never makes prose stand out. Set a verbatim block off with a blank line above and below, and give a table three-space column gaps",
     "emoji": "none",
     "tables": "none wider than 72 characters",
     "editorial_markers": "HTML comments <!-- v149: ... --> mark content written from PLAN_v149 rather than from shipped code. Strip them before display; act on them before shipping."
@@ -36,7 +36,7 @@
     "note_on_exempt_files": "these carry topic headings, not panel-section headings. If the gate is widened past PANEL_GUIDE, exempt these views by name rather than rewriting their headings.",
     "gated_headings_used": [
       "PLOT > PLOT MODE",
-      "PLOT > WATERFALL (2D / 3D PLOTTING)",
+      "PLOT > STACKED & 3D",
       "PLOT > 2D PLOT OPTIONS",
       "PLOT > 3D PLOT OPTIONS",
       "AXES > AXIS",
@@ -55,6 +55,7 @@
       "EXPORT > PRESETS & PROJECTS",
       "EXPORT > FIGURE",
       "EXPORT > EXPORT",
+      "EXPORT > DATA FILES",
       "EXPORT > 3D PRINTING",
       "LEFT PANEL > FOLDERS",
       "LEFT PANEL > NAME FORMAT",
@@ -81,7 +82,7 @@
       "replaces": "QUICK_START",
       "gate": "exempt",
       "v149_content": false,
-      "notes": "The ten-minute path. References the bundled demo dataset generically; no demo filename is load-bearing. Required by PLAN_v149 Phase D5c."
+      "notes": "The path from raw segment files to a figure. References the bundled demo dataset generically; no demo filename is load-bearing. Required by PLAN_v149 Phase D5c."
     },
     {
       "view": "Data input",
@@ -168,7 +169,7 @@
       "replaces": null,
       "gate": "exempt",
       "v149_content": true,
-      "notes": "Goal-oriented recipes. One recipe (thickness vs pressure) is v149-marked."
+      "notes": "Goal-oriented recipes, numbered imperative steps. The data exports go through EXPORT > DATA FILES, which ticks the columns of each trace's single CSV, and the Export dialog behind 'Export data...', the left panel's 'Export...' button and Ctrl+E."
     },
     {
       "view": "Absorbance reference",
@@ -252,5 +253,6 @@
   },
   "open_questions": [],
   "open_questions_resolved": "R2 audit: the seven questions this list carried are all settled in shipped code - Decompression traces is a sub-heading inside PLOT > 2D PLOT OPTIONS (no new gated heading); Thickness is the third Plot-mode radio; the alpha and A/t builtins and the t column ship as 23_data_tab_formulas.md documents them; the Fringe card titles are live _group() titles; the pop-out helper-guide card ships in fringe_panel.py; 00_quick_start.md names demo_data.",
-  "register": "STE100 round 3 (PLAN_v149, R14 item D): one fact per sentence, under 20 words, active voice, present tense; 'the tool' is the only agent; no negative sentence; no should / must / need aimed at the user; no idiom, metaphor, rhetorical question or contrast pair; formulas verbatim on their own lines. Checked by lint_r12.py with the N (negation), S (directive) and L (sentence length) detectors. Protected widget text and verbatim Progress-log quotes are listed in the sweep's whitelist."
+  "register": "PLAN_R19 section 3: one idea per sentence, descriptive sentences under 25 words and instructions under 20, paragraphs of six sentences or fewer, instructions in the imperative and descriptions in present-tense active voice, with SPARTA (or 'the program') as the agent. Facts stay verbatim, including control names as they read on screen, defaults, ranges, units, file names and formulas on their own lines, while motivation, reassurance, similes, asides, restated headings and marketing adjectives go, and every view lands at 40-60 percent of its former word count.",
+  "register_sweep": "R19: every view rewritten to the section-3 register; v149 markers stripped. R20: the merged CSV model (one CSV per trace, EXPORT > DATA FILES ticks its columns, the Export dialog, no *_absorbance_notch.csv and no cd_tagged subfolder) and the indent rule above applied to every view; quickstart_pdf_build.mono_line_flags mirrors that rule so the PDF and the Guide box break alike"
 }

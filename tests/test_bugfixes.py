@@ -12,7 +12,6 @@ opened for real and forced off-screen at +3200+100: a test run must never
 flash a window at the user.
 """
 import contextlib
-import json
 import os
 import struct
 import sys
@@ -271,20 +270,22 @@ def test_bugfix_f3_smoothing_dialog_clamps_the_point_counts(a):
 
 
 @gui
-def test_bugfix_f3_export_smoothed_survives_a_short_trace(a, tmp_path,
-                                                          monkeypatch):
-    """_export_smoothed has no try/except, so the crash escaped into the
-    Tk button callback and the export silently did nothing."""
+def test_bugfix_f3_export_smoothed_survives_a_short_trace(a, tmp_path):
+    """The smoothed loop had no try/except, so the crash escaped into the
+    Tk button callback and the export silently did nothing. R19 gave every
+    caller one loop; R20 made it the Smoothed COLUMN of _write_final_csvs,
+    and the guard has to still be there."""
     a._finish_run([_res("Y04", "Arch29", "12p5", 12.5)], [], "dest")
     for r in a.results:
         a.trace_vars[r["label"]].set(True)
     a.smooth_params["density_win"] = 6000           # > the 12-point trace
     a.smooth_cache.clear()
     a.show_smooth.set(True)
-    monkeypatch.setattr(app.filedialog, "askdirectory",
-                        lambda **k: str(tmp_path))
-    a._export_smoothed()
-    assert [f for f in os.listdir(str(tmp_path)) if f.endswith("_smoothed.csv")]
+    res = a._write_final_csvs(a.results, str(tmp_path), columns=["smoothed"])
+    assert len(res["paths"]) == 1
+    assert res["columns"] == ["Absorbance_smoothed"]
+    assert [f for f in os.listdir(str(tmp_path))
+            if f.endswith("_absorbance.csv")]
 
 
 # ------------------------------------------------------------------- F4 ----
@@ -318,48 +319,47 @@ def _collide():
 
 
 @gui
-def test_bugfix_f5_counts_match_the_files_on_disk(a, tmp_path, monkeypatch):
+def test_bugfix_f5_counts_match_the_files_on_disk(a, tmp_path):
     """The branch dict was keyed by engine label, and labels are not
     unique: 4 files were written but the log line and the provenance
     sidecar counted the 2 distinct LABELS, claiming 2 compression CSVs
-    that do not exist."""
+    that do not exist. R20: the C/D row is a rule about the ONE CSV each
+    trace gets, so the count is simply how many files came back, and it is
+    still per record and not per label."""
     a._finish_run([dict(r) for r in _collide()], [], "dest")
     for r in a.results:
         a.dvars[r["label"]].set(True)               # everything decompression
-    monkeypatch.setattr(app.filedialog, "askdirectory",
-                        lambda **k: str(tmp_path))
-    monkeypatch.setattr(app.messagebox, "showinfo", lambda *x, **k: None)
-    a._export_branch_csvs()
-    csvs = sorted(f for f in os.listdir(str(tmp_path)) if f.endswith(".csv"))
-    assert len(csvs) == 4
+    a.export_products["defringed"].set(False)       # base columns only
+    a.export_products["cd_tagged"].set(True)
+    res = a._write_final_csvs(a.results, str(tmp_path))
+    csvs = sorted(f for f in os.listdir(str(tmp_path))
+                  if f.endswith(".csv"))
+    assert len(csvs) == 4                           # was 2 labels
     assert all("_d_" in f.lower() for f in csvs)
-    with open(os.path.join(str(tmp_path), "_export.provenance.json")) as f:
-        prov = json.load(f)
-    p = prov["params"]
-    assert p["n_csv"] == 4
-    assert p["n_decompression"] == 4                # was 2
-    assert p["n_compression"] == 0                  # was 2 (files that never existed)
-    assert len(p["branches"]) == 4                  # one entry per FILE
-    assert sorted(p["branches"]) == csvs
-    assert len(prov["files"]) == 4
+    assert len(res["paths"]) == 4
+    assert res["params"]["n"] == 4
+    assert res["params"]["cd_names"] is True
 
 
 @gui
-def test_bugfix_f5_write_tagged_csvs_takes_a_per_record_sequence(a, tmp_path):
-    """The positional form is what makes colliding labels tag correctly;
-    the legacy {label: branch} mapping still works for existing callers."""
-    res = _collide()
-    seq = a._write_tagged_csvs(res, ["C", "D", "D", "C"], str(tmp_path))
-    assert [os.path.basename(p) for p in seq] == [
-        "Y04_A_12p5_C_absorbance.csv",
-        "Y04_A_12p50_D_absorbance.csv",
+def test_bugfix_f5_every_record_gets_its_own_file(a, tmp_path):
+    """Three records print ONE engine label, so a label-keyed answer
+    describes fewer points than there are files. The writer walks records,
+    not labels: four points, four distinct names, each carrying the letter
+    its own D box asks for."""
+    a._finish_run([dict(r) for r in _collide()], [], "dest")
+    assert len(a.dvars) == 2 < len(a.results) == 4    # the F5 trap itself
+    for r in a.results:
+        a.dvars[r["label"]].set(r["sample"] == "A")
+    names = [os.path.basename(p) for p in
+             a._write_final_csvs(a.results, str(tmp_path),
+                                 columns=[], cd_names=True)["paths"]]
+    assert sorted(names) == [
         "Y04_A_12p500_D_absorbance.csv",
+        "Y04_A_12p50_D_absorbance.csv",
+        "Y04_A_12p5_D_absorbance.csv",
         "Y04_B_20p0_C_absorbance.csv"]
-    d2 = tmp_path / "dict"
-    d2.mkdir()
-    byname = a._write_tagged_csvs(res, {res[3]["label"]: "D"}, str(d2))
-    assert os.path.basename(byname[3]) == "Y04_B_20p0_D_absorbance.csv"
-    assert os.path.basename(byname[0]) == "Y04_A_12p5_C_absorbance.csv"
+    assert len(set(names)) == 4
 
 
 # ---------------------------------------------------------------- F6 / F7 --

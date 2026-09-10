@@ -339,7 +339,9 @@ def test_shortcuts_popup_is_a_styled_singleton(a):
         assert "m" in txt.tag_names(line), txt.tag_names(line)
         # ...and the closing note is prose, not a table row
         # R12 re-toned the note; it is still prose, not a table row
-        note = txt.search("The tool ignores single keys", "1.0")
+        # R19 register rule 2: the agent noun is SPARTA, "the tool" retires.
+        # The note itself is unchanged in substance and still prose.
+        note = txt.search("SPARTA ignores single keys", "1.0")
         assert note, "the closing note is gone"
         assert "b" in txt.tag_names(note), txt.tag_names(note)
         assert win.winfo_toplevel() is win

@@ -926,23 +926,56 @@ def process_group(gkey, group, warn=None):
 # ---------------------------------------------------------------------------
 # CSV writer + top-level driver
 # ---------------------------------------------------------------------------
-def write_absorbance_csv(result, out_dir):
+#: The six columns every absorbance CSV opens with, in this frozen order.
+ABSORBANCE_BASE_COLUMNS = ["Wavelength_nm", "Wavenumber_cm-1", "Absorbance",
+                           "Dark", "Background", "Sample"]
+
+
+def write_absorbance_csv(result, out_dir, extra=None, branch=None):
     """Write one result dict to {DAC}_{SAMPLE}_{PRESSURE}[_C|_D]_absorbance.csv.
 
     Only the latest retake of a group reaches this writer (process_group),
-    so the filename needs no replicate suffix."""
+    so the filename needs no replicate suffix.
+
+    The six base columns (ABSORBANCE_BASE_COLUMNS) are frozen in name and in
+    order.  `extra` appends more of them, in the caller's order, AFTER those
+    six: None, or a list of (header, 1-D array aligned with result["wl"]).
+    That is how R20 puts every ticked product -- the notch columns, the
+    smoothed ones, a formula's values -- into the trace's ONE file.  A column
+    whose length does not match the trace is a caller bug and raises.
+
+    `branch` forces the name's letter: None keeps today's rule (the letter
+    the raw file names carried, result["branch_tag"]), "C" or "D" puts that
+    letter on the name whatever the record says.  The record is never
+    mutated, so the caller's copy still reports where its data came from.
+
+    With extra=None and branch=None the bytes are the pre-R20 writer's, value
+    for value: utf-8, the csv module, one header row, blank cell for NaN.
+    Returns the path written.
+    """
     dac, sample, pstr = result["dac"], result["sample"], result["pressure_str"]
     stem = "%s_%s_%s" % (dac, sample, pstr)
-    if result.get("branch_tag"):
-        stem += "_" + result["branch_tag"]
+    tag = branch or result.get("branch_tag")
+    if tag:
+        stem += "_" + str(tag)
     path = os.path.join(out_dir, stem + "_absorbance.csv")
+    header = list(ABSORBANCE_BASE_COLUMNS)
+    cols = [result["wl"], result["wn"], result["absorbance"],
+            result["dark_c"], result["bg_c"], result["samp_c"]]
+    n = len(result["wl"])
+    for name, arr in (extra or ()):
+        arr = np.asarray(arr, float)
+        if arr.shape != (n,):
+            raise ValueError("extra column %r has %s values, the trace has %d"
+                             % (name, "x".join(str(d) for d in arr.shape), n))
+        header.append(name)
+        cols.append(arr)
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["Wavelength_nm", "Wavenumber_cm-1", "Absorbance",
-                    "Dark", "Background", "Sample"])
-        for row in zip(result["wl"], result["wn"], result["absorbance"],
-                       result["dark_c"], result["bg_c"], result["samp_c"]):
-            w.writerow(["" if (isinstance(v, float) and np.isnan(v)) else v
+        w.writerow(header)
+        for row in zip(*cols):
+            w.writerow(["" if (isinstance(v, (float, np.floating))
+                               and np.isnan(v)) else v
                         for v in row])
     return path
 
@@ -952,8 +985,17 @@ def load_processed_folder(in_dir, log=None):
     results (viewer mode: nothing is recomputed or written).
 
     Accepts the writer's schema (Wavelength_nm, Wavenumber_cm-1, Absorbance,
-    Dark, Background, Sample); blank cells -> NaN. *_absorbance_notch.csv
-    companions and files that do not match are ignored.
+    Dark, Background, Sample); blank cells -> NaN. Columns are found BY NAME,
+    so the R20 extras a file may carry after those six (Absorbance_notch,
+    Background_notch, Sample_notch, the smoothed columns, a formula's) are
+    read past and ignored, whatever order they sit in. A file with no
+    Wavelength_nm header is skipped. Legacy *_absorbance_notch.csv companions
+    (written before R20 retired the standalone notch file) and files that do
+    not match are ignored.
+
+    The name still carries the C/D letter: {DAC}_{SAMPLE}_{PRESSURE}[_C|_D].
+    The writer builds a stem from those three fields plus at most ONE letter,
+    forced or not, so a forced tag parses exactly like a raw-file one.
     """
     results = []
     for fname in sorted(os.listdir(in_dir)):
